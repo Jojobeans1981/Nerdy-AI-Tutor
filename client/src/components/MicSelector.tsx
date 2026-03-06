@@ -33,13 +33,15 @@ export function MicSelector({ selectedDeviceId, onSelect }: Props) {
       value={selectedDeviceId || ''}
       onChange={(e) => onSelect(e.target.value)}
       style={{
-        padding: '8px 12px',
+        padding: '7px 12px',
         borderRadius: 8,
-        border: '1px solid #333',
-        background: '#1a1a2e',
-        color: '#e0e0e0',
+        border: '1px solid rgba(255,255,255,0.1)',
+        background: 'rgba(255,255,255,0.04)',
+        color: '#94a3b8',
         fontSize: 12,
-        maxWidth: 250,
+        maxWidth: 200,
+        outline: 'none',
+        cursor: 'pointer',
       }}
     >
       {devices.map((d) => (

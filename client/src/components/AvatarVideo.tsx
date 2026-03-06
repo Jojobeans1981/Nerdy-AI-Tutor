@@ -60,6 +60,13 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
     let cancelled = false;
 
     const init = async () => {
+      if (!SIMLI_API_KEY || !SIMLI_FACE_ID) {
+        const missing = [!SIMLI_API_KEY && 'VITE_SIMLI_API_KEY', !SIMLI_FACE_ID && 'VITE_SIMLI_FACE_ID'].filter(Boolean).join(', ');
+        console.error(`[Simli] Missing env vars: ${missing} — avatar will not connect`);
+        setErrorMsg(`Missing env vars: ${missing}`);
+        setStatus('error');
+        return;
+      }
       try {
         const [{ session_token }, iceServers] = await Promise.all([
           generateSimliSessionToken({
@@ -135,8 +142,8 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
         overflow: 'hidden',
         border: '1px solid #222',
         background: '#0a0a1a',
-        aspectRatio: '4/3',
-        minHeight: 280,
+        height: 260,
+        flexShrink: 0,
       }}
     >
       <video

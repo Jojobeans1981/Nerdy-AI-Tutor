@@ -12,6 +12,7 @@ export interface LatencyReport {
 export class LatencyTracker {
   private start = 0;
   private marks: Record<string, number> = {};
+  private sttMsOverride: number | null = null;
   public interaction_id: string;
 
   constructor(interaction_id: string) {
@@ -23,11 +24,16 @@ export class LatencyTracker {
     this.marks[stage] = performance.now();
   }
 
+  /** Inject the true STT duration measured by the STT module (first audio → speech_final) */
+  setSttMs(ms: number): void {
+    this.sttMsOverride = ms;
+  }
+
   report(): LatencyReport {
     const now = performance.now();
     return {
       interaction_id: this.interaction_id,
-      stt_ms: this.delta('stt_end'),
+      stt_ms: this.sttMsOverride ?? this.delta('stt_end'),
       llm_first_token_ms: this.delta('llm_first_token'),
       tts_first_byte_ms: this.delta('tts_first_byte'),
       avatar_render_ms: this.delta('avatar_render'),
