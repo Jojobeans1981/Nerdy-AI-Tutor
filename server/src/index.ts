@@ -12,9 +12,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { DeepgramSTT } from './pipeline/stt.js';
 import { TutorSession } from './services/pipeline.js';
 import { getReports } from './utils/latency.js';
+import { preloadVoice } from './pipeline/tts.js';
+import { warmTtsCache, setTtsCacheVoiceId, getCacheStats } from './utils/ttsCache.js';
 
 // Validate required env vars
-const required = ['DEEPGRAM_API_KEY', 'GROQ_API_KEY', 'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID'];
+const required = ['DEEPGRAM_API_KEY', 'GROQ_API_KEY', 'CARTESIA_API_KEY'];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing env var: ${key}`);
@@ -28,6 +30,7 @@ app.use(express.json());
 
 app.get('/api/latency', (_req, res) => { res.json(getReports()); });
 app.get('/api/health',  (_req, res) => { res.json({ status: 'ok', timestamp: Date.now() }); });
+app.get('/api/cache',   (_req, res) => { res.json(getCacheStats()); });
 
 const server = createServer(app);
 
@@ -77,8 +80,32 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
           console.log('[WS] Audio config:', msg);
           return;
         }
+        if (msg.type === 'text_input') {
+          const text = (typeof msg.text === 'string' ? msg.text : '').trim();
+          if (!text) return;
+          interactionCount++;
+          const interactionId = `int_${Date.now()}_${interactionCount}`;
+          // Confirm as final transcript so client shows the message
+          ws.send(JSON.stringify({ type: 'transcript', text, is_final: true }));
+          console.log(`[Text] Input #${interactionCount}: "${text}"`);
+          session.processUtterance(text, interactionId, 0).catch((err) => {
+            console.error('[Pipeline] Error:', err);
+            ws.send(JSON.stringify({ type: 'error', message: 'Pipeline error' }));
+          });
+          return;
+        }
         if (msg.type === 'avatar_rendered') {
-          console.log(`[WS] avatar_rendered  id=${msg.interaction_id ?? 'unknown'}`);
+          const renderMs = typeof msg.render_ms === 'number' ? msg.render_ms : -1;
+          console.log(`[WS] avatar_rendered  id=${msg.interaction_id ?? 'unknown'}  render_ms=${renderMs}`);
+          session.reportAvatarRender(msg.interaction_id, renderMs);
+          return;
+        }
+        if (msg.type === 'lip_sync_report') {
+          console.log(
+            `[LipSync] id=${msg.interaction_id}  avg=${msg.avg_offset_ms}ms  max=${msg.max_offset_ms}ms  ` +
+            `within_45ms=${Math.round((msg.within_45ms ?? 0) * 100)}%  within_80ms=${Math.round((msg.within_80ms ?? 0) * 100)}%  ` +
+            `samples=${msg.sample_count}`,
+          );
           return;
         }
       } catch { /* not JSON */ }
@@ -100,8 +127,21 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 });
 
 const PORT = parseInt(process.env.PORT || '3001');
-server.listen(PORT, () => {
-  console.log(`[Server] Running on http://localhost:${PORT}`);
-  console.log(`[Server] WebSocket at ws://localhost:${PORT}/ws/session`);
-  console.log(`[Server] Latency dashboard at http://localhost:${PORT}/api/latency`);
+
+// Preload Cartesia voice, then warm the TTS cache before accepting connections
+preloadVoice().then(async (voiceId) => {
+  // Warm TTS cache in background — non-blocking, server starts immediately
+  if (voiceId) {
+    setTtsCacheVoiceId(voiceId);
+    warmTtsCache().catch(err => console.warn('[TTS Cache] Warm failed:', err.message));
+  }
+  server.listen(PORT, () => {
+    console.log(`[Server] Running on http://localhost:${PORT}`);
+    console.log(`[Server] WebSocket at ws://localhost:${PORT}/ws/session`);
+    console.log(`[Server] Latency dashboard at http://localhost:${PORT}/api/latency`);
+    console.log(`[Server] Cache stats at http://localhost:${PORT}/api/cache`);
+  });
+}).catch((err) => {
+  console.error('[Server] Failed to preload Cartesia voice:', err.message);
+  process.exit(1);
 });

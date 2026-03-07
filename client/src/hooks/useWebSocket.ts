@@ -18,6 +18,7 @@ interface WSMessage {
 interface UseWebSocketReturn {
   isConnected: boolean;
   sendAudio: (data: ArrayBuffer) => void;
+  sendJson: (msg: object) => void;
   onMessage: (handler: (msg: WSMessage) => void) => void;
   connect: () => void;
   disconnect: () => void;
@@ -72,6 +73,12 @@ export function useWebSocket(url: string): UseWebSocketReturn {
     }
   }, []);
 
+  const sendJson = useCallback((msg: object) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msg));
+    }
+  }, []);
+
   const onMessage = useCallback((handler: (msg: WSMessage) => void) => {
     // Replace — never accumulate. Every re-render that calls onMessage() replaces
     // the previous handler rather than stacking duplicates, which would cause every
@@ -85,5 +92,5 @@ export function useWebSocket(url: string): UseWebSocketReturn {
     };
   }, []);
 
-  return { isConnected, sendAudio, onMessage, connect, disconnect };
+  return { isConnected, sendAudio, sendJson, onMessage, connect, disconnect };
 }

@@ -29,7 +29,7 @@ export function LatencyDashboard({ reports }: Props) {
       ) : (
         <>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Row label="STT" ms={last.stt_ms} limit={300} avg={avg(last10.map((r) => r.stt_ms))} />
+            <Row label="STT endpoint" ms={last.stt_ms} limit={300} avg={avg(last10.map((r) => r.stt_ms))} tooltip="Deepgram endpointing delay — silence after last word → speech_final. ~200ms by config." />
             <Row label="LLM 1st tok" ms={last.llm_first_token_ms} limit={400} avg={avg(last10.map((r) => r.llm_first_token_ms))} />
             <Row label="TTS 1st byte" ms={last.tts_first_byte_ms} limit={300} avg={avg(last10.map((r) => r.tts_first_byte_ms))} />
             <Row label="Avatar" ms={last.avatar_render_ms} limit={200} avg={avg(last10.map((r) => r.avatar_render_ms))} />
@@ -45,10 +45,10 @@ export function LatencyDashboard({ reports }: Props) {
   );
 }
 
-function Row({ label, ms, limit, avg: avgStr, bold }: { label: string; ms: number; limit: number; avg: string; bold?: boolean }) {
+function Row({ label, ms, limit, avg: avgStr, bold, tooltip }: { label: string; ms: number; limit: number; avg: string; bold?: boolean; tooltip?: string }) {
   const color = badge(ms, limit);
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'monospace', fontWeight: bold ? 700 : 400 }}>
+    <div title={tooltip} style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'monospace', fontWeight: bold ? 700 : 400, cursor: tooltip ? 'help' : undefined }}>
       <span style={{ flex: 1, color: '#64748b', fontSize: 11 }}>{label}</span>
       <span style={{ minWidth: 52, textAlign: 'right', color: ms >= 0 ? color : '#334155', fontSize: 12 }}>
         {ms >= 0 ? `${ms}ms` : '--'}

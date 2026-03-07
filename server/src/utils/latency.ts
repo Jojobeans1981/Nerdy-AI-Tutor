@@ -60,3 +60,9 @@ export function storeReport(r: LatencyReport): void {
 export function getReports(): LatencyReport[] {
   return reports;
 }
+
+/** Update avatar_render_ms on an already-stored report when the client sends it back */
+export function updateAvatarRender(interaction_id: string, render_ms: number): void {
+  const r = reports.find(x => x.interaction_id === interaction_id);
+  if (r && render_ms > 0) r.avatar_render_ms = render_ms;
+}

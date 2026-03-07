@@ -2,13 +2,13 @@
  * Streaming pipeline: STT final transcript → LLM token stream → TTS audio chunks
  *
  * TRUE PIPELINE: All three stages run concurrently.
- * - LLM tokens stream directly into ElevenLabsTTS.sendToken()
+ * - LLM tokens stream directly into CartesiaTTS.sendToken()
  * - TTS audio chunks are forwarded to the client via callback the instant they arrive
  * - No stage waits for the previous to complete
  */
-import { LatencyTracker, storeReport } from '../utils/latency.js';
+import { LatencyTracker, storeReport, updateAvatarRender } from '../utils/latency.js';
 import { streamLLM, type ChatMessage } from '../pipeline/llm.js';
-import { ElevenLabsTTS } from '../pipeline/tts.js';
+import { CartesiaTTS } from '../pipeline/tts.js';
 import type { WebSocket as ClientWS } from 'ws';
 
 /** Manages one tutoring session's conversation history and streaming pipeline */
@@ -17,8 +17,16 @@ export class TutorSession {
   private history: ChatMessage[] = [];
   // Guard: only one pipeline runs at a time
   private isBusy = false;
+  // Queue the latest utterance received while busy (replaces any prior queued one)
+  private pendingUtterance: { transcript: string; interactionId: string; sttMs: number } | null = null;
 
   constructor(private ws: ClientWS, private concept: string = 'fractions') {}
+
+  /** Called by the WebSocket handler when the client reports avatar render latency */
+  reportAvatarRender(interactionId: string, renderMs: number): void {
+    updateAvatarRender(interactionId, renderMs);
+    console.log(`[Avatar] render_ms=${renderMs}  id=${interactionId}`);
+  }
 
   /** Update the active concept and reset conversation history */
   setConcept(concept: string): void {
@@ -37,7 +45,9 @@ export class TutorSession {
     sttMs = 0,
   ): Promise<void> {
     if (this.isBusy) {
-      console.log(`[Pipeline] Busy — ignoring: "${transcript.slice(0, 60)}"`);
+      // Queue the utterance so it runs after the current pipeline finishes
+      console.log(`[Pipeline] Busy — queuing: "${transcript.slice(0, 60)}"`);
+      this.pendingUtterance = { transcript, interactionId, sttMs };
       return;
     }
     this.isBusy = true;
@@ -45,6 +55,14 @@ export class TutorSession {
       await this._runPipeline(transcript, interactionId, sttMs);
     } finally {
       this.isBusy = false;
+      // Process queued utterance if any
+      if (this.pendingUtterance) {
+        const pending = this.pendingUtterance;
+        this.pendingUtterance = null;
+        this.processUtterance(pending.transcript, pending.interactionId, pending.sttMs).catch((err) => {
+          console.error('[Pipeline] Queued utterance error:', err);
+        });
+      }
     }
   }
 
@@ -61,7 +79,7 @@ export class TutorSession {
     // TTS WebSocket connect() is fire-and-forget — it returns immediately.
     // Tokens sent before the WS opens are buffered inside ElevenLabsTTS.
     // This overlaps the ~100ms ElevenLabs handshake with the Groq API call.
-    const tts = new ElevenLabsTTS({
+    const tts = new CartesiaTTS({
       onAudioChunk: (base64Pcm) => {
         this.ws.send(JSON.stringify({
           type: 'audio',
@@ -103,24 +121,24 @@ export class TutorSession {
       tts.sendToken(token);
     }
 
-    // Signal end of text stream → ElevenLabs will flush and close
+    // Send full text to Cartesia — it streams audio back as it synthesizes
     tts.endStream();
 
-    // Wait for all audio chunks to be delivered
-    console.log('[TTS] Waiting for complete...');
-    await tts.waitForComplete();
-    console.log('[TTS] Complete');
-
-    // Update conversation history
+    // Update conversation history immediately (LLM is done)
     this.history.push({ role: 'user', content: transcript });
     this.history.push({ role: 'assistant', content: fullResponse });
     console.log(`[Session] History: ${this.history.length} messages  concept="${this.concept}"`);
 
-    // Signal response complete to client
+    // Signal response complete to client as soon as text is done —
+    // audio chunks continue streaming in the background via onAudioChunk.
     console.log(`[Pipeline] response_end  length=${fullResponse.length}`);
     this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId }));
 
-    // Finalize latency report
+    // Wait up to 2s for TTS first byte, then send the latency report
+    // so tts_first_byte_ms is captured accurately.
+    const ttsTimeout = new Promise<void>(r => setTimeout(r, 2000));
+    await Promise.race([tts.waitForComplete(), ttsTimeout]);
+
     tracker.mark('pipeline_end');
     const report = tracker.report();
     storeReport(report);
@@ -131,5 +149,8 @@ export class TutorSession {
       `STT=${report.stt_ms}ms LLM=${report.llm_first_token_ms}ms ` +
       `TTS=${report.tts_first_byte_ms}ms Total=${report.total_ms}ms`,
     );
+
+    // Let remaining audio finish in background
+    tts.waitForComplete().catch(() => {});
   }
 }

@@ -1,156 +1,173 @@
 /**
- * TTS module — ElevenLabs streaming WebSocket.
+ * TTS module — Cartesia Sonic streaming WebSocket.
  *
- * connect() is FIRE-AND-FORGET — it initiates the WebSocket but returns
- * immediately so the LLM can start in parallel. Tokens sent before the
- * WebSocket opens are buffered and flushed once the connection is ready.
+ * Replaces ElevenLabs. Cartesia delivers first audio in ~50-100ms after
+ * receiving text vs ElevenLabs' ~400ms floor, enabling sub-700ms pipelines.
  *
- * This saves the full WS handshake time (~100ms) from the critical path.
+ * connect() is FIRE-AND-FORGET — the WS handshake overlaps the LLM call.
+ * All tokens are accumulated locally and sent in one request when endStream()
+ * fires, so Cartesia gets the full text at once and starts synthesizing immediately.
  */
 import { WebSocket } from 'ws';
 
-const VOICE_ID  = () => process.env.ELEVENLABS_VOICE_ID!;
-const ELEVEN_KEY = () => process.env.ELEVENLABS_API_KEY!;
+const API_KEY  = () => process.env.CARTESIA_API_KEY!;
+const VERSION  = '2024-06-10';
+const MODEL    = 'sonic-english';
+const WS_URL   = () =>
+  `wss://api.cartesia.ai/tts/websocket?api_key=${API_KEY()}&cartesia_version=${VERSION}`;
 
-// eleven_flash_v2_5 = ElevenLabs' ultra-low-latency model (~2× faster than turbo)
-const ELEVEN_WS_URL = () =>
-  `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID()}/stream-input` +
-  `?model_id=eleven_flash_v2_5&output_format=pcm_16000&optimize_streaming_latency=4`;
+// ── Voice resolution ──────────────────────────────────────────────────────────
+let cachedVoiceId = '';
 
+/**
+ * Fetch available Cartesia voices and cache a suitable English male voice.
+ * Called once at server startup so every TTS request has it ready.
+ */
+export async function preloadVoice(): Promise<string> {
+  if (process.env.CARTESIA_VOICE_ID) {
+    cachedVoiceId = process.env.CARTESIA_VOICE_ID;
+    console.log(`[TTS] Cartesia voice (env): ${cachedVoiceId}`);
+    return cachedVoiceId;
+  }
+
+  const res = await fetch('https://api.cartesia.ai/voices', {
+    headers: { 'X-API-Key': API_KEY(), 'Cartesia-Version': VERSION },
+  });
+
+  if (!res.ok) throw new Error(`Cartesia voices fetch failed: ${res.status} ${await res.text()}`);
+
+  const voices: any[] = await res.json();
+
+  // Prefer a public English voice with male characteristics
+  const pick =
+    voices.find(v => v.language === 'en' && v.is_public &&
+      (v.description?.toLowerCase().includes('male') || v.name?.toLowerCase().match(/\b(man|male|guy|liam|james|josh|adam)\b/))) ??
+    voices.find(v => v.language === 'en' && v.is_public) ??
+    voices[0];
+
+  cachedVoiceId = pick.id;
+  console.log(`[TTS] Cartesia voice selected: "${pick.name}" (${pick.id})`);
+  return cachedVoiceId;
+}
+
+// ── Callbacks ─────────────────────────────────────────────────────────────────
 export interface TtsCallbacks {
-  /** Fires immediately for every base64 PCM chunk — concurrent with LLM loop */
+  /** Fires immediately for every raw PCM audio chunk as it arrives */
   onAudioChunk: (base64Pcm: string) => void;
   /** ms from connect() call to first audio chunk */
   onFirstByte: (ms: number) => void;
-  /** ElevenLabs API error (e.g. payment_required) */
+  /** API-level error from Cartesia */
   onError: (error: string, message: string) => void;
 }
 
-export class ElevenLabsTTS {
+// ── CartesiaTTS ───────────────────────────────────────────────────────────────
+export class CartesiaTTS {
   private ws: WebSocket | null = null;
-  /** Buffer for tokens that arrive before the WebSocket is open */
-  private preOpenBuffer = '';
-  /** Buffer for boundary-based flushing once connected */
-  private tokenBuffer = '';
+  /** All tokens accumulated until endStream() fires the single request */
+  private textBuffer = '';
   private wsOpen = false;
+  private streamEnded = false;
   private connectMs = 0;
   private isFirstAudio = true;
   private doneResolve!: () => void;
-  private readonly done: Promise<void>;
+  readonly done: Promise<void>;
 
-  constructor(private callbacks: TtsCallbacks) {
-    this.done = new Promise<void>((resolve) => { this.doneResolve = resolve; });
+  constructor(private cb: TtsCallbacks) {
+    this.done = new Promise<void>(r => { this.doneResolve = r; });
   }
 
   /**
-   * Initiate the ElevenLabs WebSocket connection — returns immediately.
-   * The pipeline can start the LLM right after calling this without waiting.
+   * Initiate the Cartesia WebSocket — returns immediately (fire-and-forget).
+   * The WS handshake (~50ms) overlaps with the LLM call so it's ready when
+   * endStream() fires.
    */
   connect(): void {
     this.connectMs = Date.now();
-    this.ws = new WebSocket(ELEVEN_WS_URL(), {
-      headers: { 'xi-api-key': ELEVEN_KEY() },
-    });
+    this.ws = new WebSocket(WS_URL());
 
     this.ws.on('open', () => {
-      console.log('[TTS] ElevenLabs WS open');
-      // Required init message must arrive before any text
-      this.ws!.send(JSON.stringify({
-        text: ' ',
-        voice_settings: {
-          stability: 0.45,
-          similarity_boost: 0.8,
-          style: 0.0,
-          use_speaker_boost: true,
-        },
-        generation_config: {
-          // 30 chars → first audio faster; larger chunks for better prosody on later chunks
-          chunk_length_schedule: [30, 60, 100, 140],
-        },
-      }));
-
+      console.log('[TTS] Cartesia WS open');
       this.wsOpen = true;
 
-      // Drain any tokens that arrived while the WS was still connecting
-      if (this.preOpenBuffer) {
-        this.tokenBuffer = this.preOpenBuffer;
-        this.preOpenBuffer = '';
-        this._flush();
+      // If endStream() was already called before WS opened, send immediately
+      if (this.streamEnded) {
+        this._send(this.textBuffer || ' ');
       }
     });
 
-    this.ws.on('message', (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-
-        if (!msg.audio) {
-          console.log('[TTS] Message:', JSON.stringify(msg).slice(0, 200));
-          if (msg.error || msg.message) {
-            this.callbacks.onError(msg.error ?? 'unknown', msg.message ?? '');
+    this.ws.on('message', (data, isBinary) => {
+      if (isBinary) {
+        this._onAudio((data as Buffer).toString('base64'));
+      } else {
+        try {
+          const msg = JSON.parse((data as Buffer).toString());
+          if (msg.data) this._onAudio(msg.data);
+          if (msg.done === true) {
+            console.log('[TTS] Cartesia stream done');
+            this.doneResolve();
           }
-          if (msg.isFinal === true) this.doneResolve();
-        }
-
-        if (msg.audio) {
-          if (this.isFirstAudio) {
-            this.isFirstAudio = false;
-            const ms = Date.now() - this.connectMs;
-            console.log(`[TTS] First audio: ${ms}ms after connect()`);
-            this.callbacks.onFirstByte(ms);
+          if (msg.error) {
+            console.error('[TTS] Cartesia error:', msg.error);
+            this.cb.onError('cartesia', String(msg.error));
+            this.doneResolve();
           }
-          this.callbacks.onAudioChunk(msg.audio);
-        }
-      } catch { /* non-JSON */ }
+        } catch { /* non-JSON frame */ }
+      }
     });
 
     this.ws.on('close', () => this.doneResolve());
-    this.ws.on('error', (err) => {
-      console.error('[TTS] WebSocket error:', err.message);
+    this.ws.on('error', err => {
+      console.error('[TTS] WS error:', err.message);
       this.doneResolve();
     });
   }
 
-  /**
-   * Feed one LLM token. If the WebSocket isn't open yet, the token is
-   * buffered and will be flushed the moment the connection opens.
-   */
+  /** Accumulate LLM tokens locally — sent all at once when endStream() fires. */
   sendToken(token: string): void {
-    if (!this.wsOpen) {
-      this.preOpenBuffer += token;
-      return;
-    }
-
-    this.tokenBuffer += token;
-    const atBoundary = /[.!?,;:]/.test(token);
-    const bufferFull = this.tokenBuffer.length >= 80;
-
-    if ((atBoundary || bufferFull) && this.tokenBuffer.trim()) {
-      this._flush();
-    }
+    this.textBuffer += token;
   }
 
-  /** Flush remaining text and send the end-of-stream marker. */
+  /**
+   * Send the full accumulated text to Cartesia in one request.
+   * Cartesia starts synthesizing immediately and streams audio back.
+   */
   endStream(): void {
-    if (!this.wsOpen) {
-      // WS never opened — nothing to flush
-      this.doneResolve();
-      return;
-    }
-    if (this.tokenBuffer.trim()) this._flush();
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ text: '' }));
-    }
+    this.streamEnded = true;
+    if (!this.wsOpen) return; // open handler will send
+    this._send(this.textBuffer || ' ');
   }
 
-  /** Resolves when ElevenLabs signals isFinal or closes the connection. */
-  waitForComplete(): Promise<void> {
-    return this.done;
+  /** Resolves when Cartesia signals done or closes the connection. */
+  waitForComplete(): Promise<void> { return this.done; }
+
+  /** Immediately close the WS and resolve the done promise. */
+  abort(): void {
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
+      this.ws = null;
+    }
+    this.doneResolve();
   }
 
-  private _flush(): void {
-    if (this.ws?.readyState === WebSocket.OPEN && this.tokenBuffer.trim()) {
-      this.ws.send(JSON.stringify({ text: this.tokenBuffer }));
+  private _onAudio(base64: string): void {
+    if (this.isFirstAudio) {
+      this.isFirstAudio = false;
+      const ms = Date.now() - this.connectMs;
+      console.log(`[TTS] First audio: ${ms}ms after connect()`);
+      this.cb.onFirstByte(ms);
     }
-    this.tokenBuffer = '';
+    this.cb.onAudioChunk(base64);
+  }
+
+  private _send(transcript: string): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({
+      model_id:      MODEL,
+      transcript,
+      voice:         { mode: 'id', id: cachedVoiceId },
+      output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: 16000 },
+      context_id:    `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    }));
   }
 }

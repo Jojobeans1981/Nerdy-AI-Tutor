@@ -4,9 +4,45 @@ import { SimliClient, generateSimliSessionToken, generateIceServers } from 'siml
 const SIMLI_API_KEY = import.meta.env.VITE_SIMLI_API_KEY as string;
 const SIMLI_FACE_ID = import.meta.env.VITE_SIMLI_FACE_ID as string;
 
+// Pre-fetch session token + ICE servers on module load (before user picks a topic)
+// so the avatar connects instantly when the component mounts.
+let prefetchedAuth: Promise<{ session_token: string; iceServers: any }> | null = null;
+
+function prefetchSimliAuth() {
+  if (prefetchedAuth) return prefetchedAuth;
+  if (!SIMLI_API_KEY || !SIMLI_FACE_ID) return null;
+  prefetchedAuth = Promise.all([
+    generateSimliSessionToken({
+      config: {
+        faceId: SIMLI_FACE_ID,
+        handleSilence: true,
+        maxSessionLength: 600,
+        maxIdleTime: 120,
+      },
+      apiKey: SIMLI_API_KEY,
+    }),
+    generateIceServers(SIMLI_API_KEY),
+  ]).then(([tokenRes, iceServers]) => ({
+    session_token: tokenRes.session_token,
+    iceServers,
+  }));
+  // If prefetch fails, allow retry
+  prefetchedAuth.catch(() => { prefetchedAuth = null; });
+  return prefetchedAuth;
+}
+
+// Start prefetching immediately on module load
+prefetchSimliAuth();
+
 export interface AvatarVideoHandle {
   /** Send a base64-encoded PCM 16-bit 16kHz mono audio chunk to Simli */
   sendAudio: (base64Pcm: string) => void;
+  /** Timestamp (Date.now()) of when Simli last started rendering video */
+  getLastRenderStartMs: () => number;
+  /** Measured lip-sync offset samples (audio sent ms vs video frame ms) */
+  getLipSyncSamples: () => number[];
+  /** Reset render start and lip-sync samples for a new interaction */
+  resetForInteraction: () => void;
 }
 
 interface Props {
@@ -20,6 +56,11 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
   const audioRef = useRef<HTMLAudioElement>(null);
   const simliRef = useRef<SimliClient | null>(null);
   const isReadyRef = useRef(false);
+  const lastRenderStartMsRef = useRef(0);
+  /** Timestamps of audio chunks sent to Simli (for lip-sync measurement) */
+  const audioSentTimesRef = useRef<number[]>([]);
+  /** Measured offsets: video_frame_time - audio_sent_time in ms */
+  const lipSyncSamplesRef = useRef<number[]>([]);
   // Buffer audio chunks that arrive before Simli's WebRTC is established.
   // Without this queue every chunk sent during the 3-5s handshake is silently
   // dropped, leaving the first response completely silent.
@@ -43,11 +84,25 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
   useImperativeHandle(ref, () => ({
     sendAudio: (base64Pcm: string) => {
       if (!isReadyRef.current) {
-        // Simli handshake still in progress — queue the chunk
         pendingAudioRef.current.push(base64Pcm);
         return;
       }
+      const sentMs = Date.now();
+      // Record first audio sent time for render latency measurement
+      if (lastRenderStartMsRef.current === 0) {
+        lastRenderStartMsRef.current = sentMs;
+      }
+      // Track audio chunk send time for lip-sync measurement (keep last 20)
+      audioSentTimesRef.current.push(sentMs);
+      if (audioSentTimesRef.current.length > 20) audioSentTimesRef.current.shift();
       sendPcmToSimli(base64Pcm);
+    },
+    getLastRenderStartMs: () => lastRenderStartMsRef.current,
+    getLipSyncSamples: () => lipSyncSamplesRef.current,
+    resetForInteraction: () => {
+      lastRenderStartMsRef.current = 0;
+      audioSentTimesRef.current = [];
+      lipSyncSamplesRef.current = [];
     },
   }), [sendPcmToSimli]);
 
@@ -68,18 +123,12 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
         return;
       }
       try {
-        const [{ session_token }, iceServers] = await Promise.all([
-          generateSimliSessionToken({
-            config: {
-              faceId: SIMLI_FACE_ID,
-              handleSilence: true,
-              maxSessionLength: 600,
-              maxIdleTime: 120,
-            },
-            apiKey: SIMLI_API_KEY,
-          }),
-          generateIceServers(SIMLI_API_KEY),
-        ]);
+        // Use prefetched auth (already started on page load) or fetch now
+        const authPromise = prefetchSimliAuth();
+        if (!authPromise) throw new Error('Simli API key or face ID missing');
+        const { session_token, iceServers } = await authPromise;
+        // Clear so next mount gets a fresh token
+        prefetchedAuth = null;
 
         if (cancelled) return;
 
@@ -90,10 +139,36 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
           console.log('[Simli] Connected — draining', pendingAudioRef.current.length, 'queued chunks');
           isReadyRef.current = true;
           setStatus('ready');
+          // Pre-fetch next token so topic changes are instant
+          prefetchSimliAuth();
 
           // Drain any audio that arrived during the WebRTC handshake
           const queued = pendingAudioRef.current.splice(0);
           for (const chunk of queued) sendPcmToSimli(chunk);
+
+          // Measure lip-sync: compare when audio was sent vs when a video frame arrives.
+          // requestVideoFrameCallback fires when the browser renders each video frame.
+          // We compare the frame's presentationTime to the nearest audio sent time to
+          // estimate audio-video sync offset.
+          if (typeof (videoEl as any).requestVideoFrameCallback === 'function') {
+            const measureFrame = (now: number) => {
+              if (!isReadyRef.current) return;
+              const sentTimes = audioSentTimesRef.current;
+              if (sentTimes.length > 0) {
+                // Find the audio chunk closest in time to this frame
+                const frameMs = now; // DOMHighResTimeStamp from rAF epoch
+                const wallMs = performance.timeOrigin + frameMs;
+                const nearest = sentTimes.reduce((a, b) => Math.abs(b - wallMs) < Math.abs(a - wallMs) ? b : a);
+                const offset = wallMs - nearest;
+                if (Math.abs(offset) < 500) { // ignore outliers > 500ms
+                  lipSyncSamplesRef.current.push(Math.round(offset));
+                  if (lipSyncSamplesRef.current.length > 30) lipSyncSamplesRef.current.shift();
+                }
+              }
+              (videoEl as any).requestVideoFrameCallback(measureFrame);
+            };
+            (videoEl as any).requestVideoFrameCallback(measureFrame);
+          }
         });
 
         client.on('stop', () => {

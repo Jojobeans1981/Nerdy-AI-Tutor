@@ -2,23 +2,27 @@ import { useRef, useCallback, useState } from 'react';
 
 interface UseMicrophoneReturn {
   isRecording: boolean;
+  audioLevel: number;
   startRecording: (onAudioData: (data: ArrayBuffer) => void, deviceId?: string | null) => Promise<void>;
   stopRecording: () => void;
 }
 
 export function useMicrophone(): UseMicrophoneReturn {
   const [isRecording, setIsRecording] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const streamRef = useRef<MediaStream | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef<number>(0);
 
   const startRecording = useCallback(async (onAudioData: (data: ArrayBuffer) => void, deviceId?: string | null) => {
     try {
       const audioConstraints: MediaTrackConstraints = {
         channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        echoCancellation: { ideal: true },
+        noiseSuppression: { ideal: false },
+        autoGainControl: { ideal: true },
       };
       if (deviceId) {
         audioConstraints.deviceId = { exact: deviceId };
@@ -95,6 +99,24 @@ export function useMicrophone(): UseMicrophoneReturn {
 
       source.connect(workletNode);
       workletNode.connect(audioContext.destination);
+
+      // Analyser for real-time audio level visualization
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.5;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      const updateLevel = () => {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+        const avg = sum / dataArray.length;
+        setAudioLevel(Math.min(1, avg / 128));
+        rafRef.current = requestAnimationFrame(updateLevel);
+      };
+      rafRef.current = requestAnimationFrame(updateLevel);
+
       setIsRecording(true);
       console.log('[Mic] Recording started');
     } catch (err) {
@@ -104,6 +126,9 @@ export function useMicrophone(): UseMicrophoneReturn {
   }, []);
 
   const stopRecording = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
     workletRef.current?.disconnect();
     workletRef.current = null;
     contextRef.current?.close();
@@ -111,8 +136,9 @@ export function useMicrophone(): UseMicrophoneReturn {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setIsRecording(false);
+    setAudioLevel(0);
     console.log('[Mic] Recording stopped');
   }, []);
 
-  return { isRecording, startRecording, stopRecording };
+  return { isRecording, audioLevel, startRecording, stopRecording };
 }
