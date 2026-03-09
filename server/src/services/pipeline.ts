@@ -77,8 +77,8 @@ export class TutorSession {
 
     // ── Stages 1 + 2 start concurrently ─────────────────────────────────────
     // TTS WebSocket connect() is fire-and-forget — it returns immediately.
-    // Tokens sent before the WS opens are buffered inside ElevenLabsTTS.
-    // This overlaps the ~100ms ElevenLabs handshake with the Groq API call.
+    // Tokens are accumulated locally until the WS opens, then sent in one shot.
+    // This overlaps the Cartesia handshake with the Groq API call.
     const tts = new CartesiaTTS({
       onAudioChunk: (base64Pcm) => {
         this.ws.send(JSON.stringify({

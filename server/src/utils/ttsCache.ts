@@ -83,23 +83,6 @@ export async function warmTtsCache(): Promise<void> {
   console.log(`[TTS Cache] Warm complete in ${Date.now() - start}ms. ${cache.size}/${CACHE_PHRASES.length} phrases cached.`);
 }
 
-/**
- * Check if a response starts with a cached phrase.
- * Returns the cached audio chunks if found, null otherwise.
- *
- * @param responseText  The full LLM response text
- */
-export function getCachedOpener(responseText: string): string[] | null {
-  const lower = responseText.toLowerCase().trimStart();
-  for (const phrase of CACHE_PHRASES) {
-    if (lower.startsWith(phrase.toLowerCase())) {
-      const chunks = cache.get(phrase.toLowerCase());
-      if (chunks) return chunks;
-    }
-  }
-  return null;
-}
-
 export function getCacheStats(): { size: number; phrases: string[] } {
   return { size: cache.size, phrases: [...cache.keys()] };
 }

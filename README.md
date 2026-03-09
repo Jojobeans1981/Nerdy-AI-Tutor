@@ -126,7 +126,7 @@ server/
       stt.ts                   DeepgramSTT: live connection, endpointing latency measurement
     utils/
       latency.ts               LatencyTracker, in-memory ring buffer of reports
-      prompts.ts               Socratic system prompt with grade-level examples
+      ttsCache.ts              Pre-synthesize common affirmation phrases at startup
 ```
 
 ## Key Technical Decisions

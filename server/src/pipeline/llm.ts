@@ -64,13 +64,6 @@ function getGroq(): Groq {
   return groqClient;
 }
 
-// ── Socratic test scenarios (logged at startup for verification) ──────────────
-export const SOCRATIC_TEST_SCENARIOS = [
-  { label: 'Direct question',  input: 'What is mitosis?' },
-  { label: 'Random answer',    input: 'The answer is 42.' },
-  { label: 'Wrong answer',     input: '1/2 + 1/3 = 2/5' },
-] as const;
-
 /**
  * Stream LLM tokens for a student utterance.
  *

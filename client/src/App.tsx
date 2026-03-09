@@ -141,7 +141,7 @@ function App() {
           break;
 
         case 'tts_error':
-          console.error('[ElevenLabs]', msg.error, msg.message);
+          console.error('[Cartesia]', msg.error, msg.message);
           alert(`TTS error (${msg.error}): ${msg.message}`);
           break;
 
@@ -393,7 +393,7 @@ function App() {
             {/* Right */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflowY: 'auto' }}>
               <LatencyDashboard reports={latencyReports} />
-              <VisualAid topic={topic} />
+              <VisualAid topic={topic ?? ''} />
               <div className="glass" style={{ padding: 16, fontSize: 12 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#475569', marginBottom: 14 }}>Session</div>
                 <div style={{ marginBottom: 12 }}>
