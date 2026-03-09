@@ -48,7 +48,7 @@ export async function warmTtsCache(): Promise<void> {
   console.log('[TTS Cache] Pre-computing', CACHE_PHRASES.length, 'common phrases...');
   const start = Date.now();
 
-  await Promise.allSettled(CACHE_PHRASES.map(async (phrase) => {
+  for (const phrase of CACHE_PHRASES) {
     try {
       const res = await fetch('https://api.cartesia.ai/tts/bytes', {
         method: 'POST',
@@ -67,7 +67,7 @@ export async function warmTtsCache(): Promise<void> {
 
       if (!res.ok) {
         console.warn(`[TTS Cache] Failed to cache "${phrase}": ${res.status}`);
-        return;
+        continue;
       }
 
       const arrayBuf = await res.arrayBuffer();
@@ -78,7 +78,7 @@ export async function warmTtsCache(): Promise<void> {
     } catch (err: any) {
       console.warn(`[TTS Cache] Error caching "${phrase}":`, err.message);
     }
-  }));
+  }
 
   console.log(`[TTS Cache] Warm complete in ${Date.now() - start}ms. ${cache.size}/${CACHE_PHRASES.length} phrases cached.`);
 }

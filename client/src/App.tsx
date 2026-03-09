@@ -31,6 +31,10 @@ function App() {
   // streamingTextRef mid-response and causing the chat bubble to vanish.
   const isAiRespondingRef = useRef(false);
   const avatarRef = useRef<AvatarVideoHandle>(null);
+  const speakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Set true when response_end arrives so trailing audio chunks (still in-flight
+  // from the Cartesia stream) don't reset the 8s watchdog and extend "Speaking".
+  const responseEndedRef = useRef(false);
 
   const ws = useWebSocket(topic ? WS_URL(topic) : WS_URL('fractions'));
   const mic = useMicrophone();
@@ -62,6 +66,7 @@ function App() {
 
         case 'token':
           isAiRespondingRef.current = true;
+          responseEndedRef.current = false; // new response starting
           streamingTextRef.current += msg.text;
           setStreamingText(streamingTextRef.current);
           break;
@@ -70,6 +75,13 @@ function App() {
           // Push PCM audio directly to Simli via imperative handle — no state update,
           // no re-render, no queue accumulation. This is the low-latency path.
           setIsAvatarActive(true);
+          // Only reset the 8s watchdog while the response is still in-flight.
+          // After response_end arrives, audio chunks are tail-end Cartesia frames
+          // already in the network buffer — don't let them extend "Speaking" by 8s.
+          if (!responseEndedRef.current) {
+            if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+            speakingTimeoutRef.current = setTimeout(() => setIsAvatarActive(false), 8000);
+          }
           avatarRef.current?.sendAudio(msg.data);
           // Report avatar render latency: time from first audio chunk sent → Simli starts rendering.
           // Simli begins video output within ~1-2 frames of receiving the first PCM chunk.
@@ -113,8 +125,14 @@ function App() {
             });
             console.log(`[LipSync] avg=${avgOffset}ms max=${maxOffset}ms samples=${samples.length}`);
           }
+          // Flush the rechunk buffer so the last partial frame (tail audio) is
+          // sent to Simli and the avatar finishes animating the final syllables.
+          avatarRef.current?.flushAudio();
           avatarRef.current?.resetForInteraction();
-          setTimeout(() => setIsAvatarActive(false), 1000);
+          // Mark response as ended so trailing audio chunks don't re-arm the 8s watchdog
+          responseEndedRef.current = true;
+          if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+          speakingTimeoutRef.current = setTimeout(() => setIsAvatarActive(false), 1000);
           break;
         }
 
@@ -212,39 +230,45 @@ function App() {
         </header>
 
         {/* Main */}
-        {!topic ? (
+        <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
 
-          /* Landing */
-          <div style={{
-            flex: 1, display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center',
-            padding: 24, textAlign: 'center',
-          }}>
+          {/* Landing overlay — shown before topic is selected.
+              Rendered on top while the session layout (with AvatarVideo) mounts
+              in the background so the Simli WebRTC handshake starts immediately. */}
+          {!topic && (
             <div style={{
-              fontSize: 11, fontWeight: 700, letterSpacing: '2.5px',
-              textTransform: 'uppercase', color: '#00d4ff', marginBottom: 16, opacity: 0.9,
-            }}>Socratic AI · Ask, Don't Tell</div>
-            <h1 style={{
-              fontSize: 'clamp(28px, 5vw, 48px)', fontWeight: 800,
-              letterSpacing: '-1px', lineHeight: 1.15, marginBottom: 16,
-              background: 'linear-gradient(135deg, #e2e8f0 30%, #7c3aed)',
-              WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+              position: 'absolute', inset: 0, zIndex: 10,
+              display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center',
+              padding: 24, textAlign: 'center',
             }}>
-              What would you like<br />to learn today?
-            </h1>
-            <p style={{ color: '#64748b', fontSize: 15, marginBottom: 52, maxWidth: 460 }}>
-              Pick a topic and start talking. Your AI tutor guides you with questions — never just giving you the answer.
-            </p>
-            <TopicSelector selected={topic} onSelect={setTopic} />
-          </div>
+              <div style={{
+                fontSize: 11, fontWeight: 700, letterSpacing: '2.5px',
+                textTransform: 'uppercase', color: '#00d4ff', marginBottom: 16, opacity: 0.9,
+              }}>Socratic AI · Ask, Don't Tell</div>
+              <h1 style={{
+                fontSize: 'clamp(28px, 5vw, 48px)', fontWeight: 800,
+                letterSpacing: '-1px', lineHeight: 1.15, marginBottom: 16,
+                background: 'linear-gradient(135deg, #e2e8f0 30%, #7c3aed)',
+                WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+              }}>
+                What would you like<br />to learn today?
+              </h1>
+              <p style={{ color: '#64748b', fontSize: 15, marginBottom: 52, maxWidth: 460 }}>
+                Pick a topic and start talking. Your AI tutor guides you with questions — never just giving you the answer.
+              </p>
+              <TopicSelector selected={topic} onSelect={setTopic} />
+            </div>
+          )}
 
-        ) : (
-
-          /* Session */
+          {/* Session layout — always mounted so AvatarVideo's WebRTC handshake
+              begins on page load (not after topic selection). Hidden via display:none
+              while on the landing page; the component stays mounted throughout. */}
           <div style={{
-            flex: 1, display: 'grid',
+            height: '100%',
+            display: topic ? 'grid' : 'none',
             gridTemplateColumns: '1fr 296px',
-            gap: 10, padding: 10, minHeight: 0,
+            gap: 10, padding: 10,
           }}>
 
             {/* Left */}
@@ -390,7 +414,7 @@ function App() {
             </div>
 
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

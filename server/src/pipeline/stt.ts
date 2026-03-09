@@ -19,12 +19,16 @@ export class DeepgramSTT {
   /** Timestamp of the first audio chunk sent in the current utterance */
   private audioStartMs = 0;
   private closed = false;
+  private reconnecting = false;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  /** Last is_final transcript that hasn't yet had speech_final — used by UtteranceEnd fallback */
+  private pendingFinalText = '';
 
   constructor(private callbacks: SttCallbacks) {}
 
   /** Open the Deepgram live connection. Safe to call before audio arrives. */
   connect(): void {
+    this.reconnecting = false;
     const client = createClient(process.env.DEEPGRAM_API_KEY!);
 
     this.live = client.listen.live({
@@ -33,7 +37,7 @@ export class DeepgramSTT {
       smart_format: true,
       interim_results: true,
       endpointing: 200,       // ms of silence → speech_final (tighter = lower latency)
-      utterance_end_ms: 1200,
+      utterance_end_ms: 1500, // fallback finalizer if speech_final never fires
       vad_events: true,
       encoding: 'linear16',
       sample_rate: 16000,
@@ -59,9 +63,8 @@ export class DeepgramSTT {
 
       if (isFinal) {
         console.log(`[STT] is_final=true speech_final=${speechFinal} text="${text.slice(0, 60)}"`);
-        // Mark the timestamp of the last recognised word boundary.
-        // When speech_final fires (possibly the same packet), the diff gives
-        // the endpointing delay (Deepgram's silence wait, ~200ms by config).
+        // Track the latest confirmed word boundary for UtteranceEnd fallback
+        this.pendingFinalText = text;
         this.audioStartMs = Date.now();
       }
 
@@ -72,11 +75,22 @@ export class DeepgramSTT {
       }
 
       // speech_final = true → utterance complete.
-      // Use the configured endpointing value (200ms) as a floor so the dashboard
-      // never shows 0ms (same-packet is_final + speech_final collapses the timer).
+      this.pendingFinalText = '';
       const rawMs = this.audioStartMs > 0 ? Date.now() - this.audioStartMs : 0;
-      const sttMs = Math.max(rawMs, 200); // endpointing is always >= config value
+      const sttMs = Math.max(rawMs, 200);
       console.log(`[STT] Final  endpointing_ms≈${sttMs}  text="${text.slice(0, 60)}"`);
+      this.audioStartMs = 0;
+      this.callbacks.onFinal(text, sttMs);
+    });
+
+    // UtteranceEnd fires 1500ms after the last word if speech_final never arrived.
+    // This handles the "stuck listening" case where background noise prevents endpointing.
+    this.live.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+      if (!this.pendingFinalText) return;
+      const text = this.pendingFinalText;
+      this.pendingFinalText = '';
+      const sttMs = this.audioStartMs > 0 ? Math.max(Date.now() - this.audioStartMs, 200) : 200;
+      console.log(`[STT] UtteranceEnd fallback  sttMs≈${sttMs}  text="${text.slice(0, 60)}"`);
       this.audioStartMs = 0;
       this.callbacks.onFinal(text, sttMs);
     });
@@ -86,12 +100,15 @@ export class DeepgramSTT {
       this.callbacks.onError?.(err);
     });
 
-    this.live.on(LiveTranscriptionEvents.Close, () => {
-      console.log('[STT] Deepgram connection closed');
+    this.live.on(LiveTranscriptionEvents.Close, (event: any) => {
+      const code = event?.code ?? event;
+      console.log(`[STT] Deepgram connection closed (code=${code})`);
       if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = null;
-      // Auto-reconnect if the session is still active
-      if (!this.closed) {
+      this.live = null;
+      // Auto-reconnect if the session is still active and not already reconnecting
+      if (!this.closed && !this.reconnecting) {
+        this.reconnecting = true;
         console.log('[STT] Reconnecting in 500ms...');
         setTimeout(() => {
           if (!this.closed) this.connect();

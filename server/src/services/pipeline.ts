@@ -97,47 +97,69 @@ export class TutorSession {
 
     tts.connect(); // non-blocking — LLM starts immediately below
 
-    // ── Stage 2: Stream LLM tokens ────────────────────────────────────────────
+    // ── Stages 2 + 3: Stream LLM → TTS ──────────────────────────────────────
+    // Wrapped in try/finally so tts.abort() ALWAYS runs — even if the LLM
+    // times out (AbortSignal fires), throws, or the client WS closes mid-stream.
+    // Without this, a failed pipeline leaves the Cartesia WS open indefinitely,
+    // blocking the next request (free tier rejects concurrent connections).
     let fullResponse = '';
-    let isFirstToken = true;
+    let llmCompleted = false;
+    try {
+      let isFirstToken = true;
 
-    for await (const token of streamLLM(transcript, this.concept, this.history)) {
-      if (isFirstToken) {
-        tracker.mark('llm_first_token');
-        isFirstToken = false;
-        console.log(`[LLM] First token  id=${interactionId}`);
+      for await (const token of streamLLM(transcript, this.concept, this.history)) {
+        if (isFirstToken) {
+          tracker.mark('llm_first_token');
+          isFirstToken = false;
+          console.log(`[LLM] First token  id=${interactionId}`);
+        }
+
+        fullResponse += token;
+
+        // Broadcast token to client for real-time text display
+        this.ws.send(JSON.stringify({
+          type: 'token',
+          text: token,
+          interaction_id: interactionId,
+        }));
+
+        // ── Stage 3: Pipe token into TTS — fires onAudioChunk concurrently ──
+        tts.sendToken(token);
       }
 
-      fullResponse += token;
+      llmCompleted = true;
 
-      // Broadcast token to client for real-time text display
-      this.ws.send(JSON.stringify({
-        type: 'token',
-        text: token,
-        interaction_id: interactionId,
-      }));
+      // Send full text to Cartesia — it streams audio back as it synthesizes
+      tts.endStream();
 
-      // ── Stage 3: Pipe token into TTS — fires onAudioChunk concurrently ────
-      tts.sendToken(token);
+      // Update conversation history immediately (LLM is done)
+      this.history.push({ role: 'user', content: transcript });
+      this.history.push({ role: 'assistant', content: fullResponse });
+      console.log(`[Session] History: ${this.history.length} messages  concept="${this.concept}"`);
+
+      // Signal response complete to client as soon as text is done —
+      // audio chunks continue streaming in the background via onAudioChunk.
+      console.log(`[Pipeline] response_end  length=${fullResponse.length}`);
+      this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId }));
+
+      // Wait up to 4s for TTS to complete, then abort to avoid dangling WS connections.
+      // Cartesia's free tier rejects a new connection if a prior WS is still open.
+      const ttsTimeout = new Promise<void>(r => setTimeout(r, 4000));
+      await Promise.race([tts.waitForComplete(), ttsTimeout]);
+    } catch (err) {
+      console.error('[Pipeline] LLM/TTS stream error:', err);
+      // Notify the client so the UI doesn't stay frozen waiting for response_end
+      this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true }));
+      // Save partial response to history so conversation context isn't lost
+      if (fullResponse) {
+        this.history.push({ role: 'user', content: transcript });
+        this.history.push({ role: 'assistant', content: llmCompleted ? fullResponse : fullResponse + '…' });
+      }
+    } finally {
+      // Always close the Cartesia WS — prevents a stale open connection
+      // from blocking the next request, regardless of how the pipeline ended.
+      tts.abort();
     }
-
-    // Send full text to Cartesia — it streams audio back as it synthesizes
-    tts.endStream();
-
-    // Update conversation history immediately (LLM is done)
-    this.history.push({ role: 'user', content: transcript });
-    this.history.push({ role: 'assistant', content: fullResponse });
-    console.log(`[Session] History: ${this.history.length} messages  concept="${this.concept}"`);
-
-    // Signal response complete to client as soon as text is done —
-    // audio chunks continue streaming in the background via onAudioChunk.
-    console.log(`[Pipeline] response_end  length=${fullResponse.length}`);
-    this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId }));
-
-    // Wait up to 2s for TTS first byte, then send the latency report
-    // so tts_first_byte_ms is captured accurately.
-    const ttsTimeout = new Promise<void>(r => setTimeout(r, 2000));
-    await Promise.race([tts.waitForComplete(), ttsTimeout]);
 
     tracker.mark('pipeline_end');
     const report = tracker.report();
@@ -149,8 +171,5 @@ export class TutorSession {
       `STT=${report.stt_ms}ms LLM=${report.llm_first_token_ms}ms ` +
       `TTS=${report.tts_first_byte_ms}ms Total=${report.total_ms}ms`,
     );
-
-    // Let remaining audio finish in background
-    tts.waitForComplete().catch(() => {});
   }
 }

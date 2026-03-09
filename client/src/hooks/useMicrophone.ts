@@ -21,7 +21,7 @@ export function useMicrophone(): UseMicrophoneReturn {
       const audioConstraints: MediaTrackConstraints = {
         channelCount: 1,
         echoCancellation: { ideal: true },
-        noiseSuppression: { ideal: false },
+        noiseSuppression: { ideal: true },
         autoGainControl: { ideal: true },
       };
       if (deviceId) {

@@ -37,6 +37,8 @@ prefetchSimliAuth();
 export interface AvatarVideoHandle {
   /** Send a base64-encoded PCM 16-bit 16kHz mono audio chunk to Simli */
   sendAudio: (base64Pcm: string) => void;
+  /** Flush any remaining bytes in the rechunk buffer (zero-pad to 6000 bytes) */
+  flushAudio: () => void;
   /** Timestamp (Date.now()) of when Simli last started rendering video */
   getLastRenderStartMs: () => number;
   /** Measured lip-sync offset samples (audio sent ms vs video frame ms) */
@@ -65,17 +67,40 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
   // Without this queue every chunk sent during the 3-5s handshake is silently
   // dropped, leaving the first response completely silent.
   const pendingAudioRef = useRef<string[]>([]);
+  // Rechunk buffer: accumulate bytes until we have a full 6000-byte frame
+  // (= 3000 Int16 samples = 187.5ms at 16kHz) before sending to Simli.
+  // Simli's internal AudioProcessor batches at 3000 samples; sending mismatched
+  // sizes causes the avatar to animate in irregular bursts, wrecking lip sync.
+  const audioRechunkBufRef = useRef<Uint8Array>(new Uint8Array(0));
+  const SIMLI_CHUNK_BYTES = 6000; // 3000 Int16 samples @ 16kHz = 187.5ms
   const [status, setStatus] = useState<Status>('connecting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Stable decode-and-send helper (simliRef is a ref so no dep needed)
+  // Rechunk incoming PCM bytes into 6000-byte frames and send via sendAudioData.
+  // sendAudioData (not Immediate) keeps Simli's internal jitter buffer active,
+  // which smooths out network delivery variations and prevents glitchy audio.
+  // Rechunking to exactly 6000 bytes (= Simli's audioBufferSize * 2 bytes/sample)
+  // gives consistent frame boundaries for predictable lip-sync animation.
   const sendPcmToSimli = useCallback((base64Pcm: string) => {
     if (!simliRef.current) return;
     try {
+      // Decode base64 → bytes
       const binary = atob(base64Pcm);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      simliRef.current.sendAudioData(bytes);
+      const incoming = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) incoming[i] = binary.charCodeAt(i);
+
+      // Append to rechunk buffer
+      const combined = new Uint8Array(audioRechunkBufRef.current.length + incoming.length);
+      combined.set(audioRechunkBufRef.current);
+      combined.set(incoming, audioRechunkBufRef.current.length);
+      audioRechunkBufRef.current = combined;
+
+      // Drain full 6000-byte frames
+      while (audioRechunkBufRef.current.length >= SIMLI_CHUNK_BYTES) {
+        const frame = audioRechunkBufRef.current.slice(0, SIMLI_CHUNK_BYTES);
+        audioRechunkBufRef.current = audioRechunkBufRef.current.slice(SIMLI_CHUNK_BYTES);
+        simliRef.current.sendAudioData(frame);
+      }
     } catch (err) {
       console.warn('[Simli] sendAudio error:', err);
     }
@@ -97,12 +122,22 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
       if (audioSentTimesRef.current.length > 20) audioSentTimesRef.current.shift();
       sendPcmToSimli(base64Pcm);
     },
+    flushAudio: () => {
+      // Pad the remaining bytes with silence and send the final frame so the
+      // avatar completes its lip animation for the last syllables.
+      if (!simliRef.current || audioRechunkBufRef.current.length === 0) return;
+      const padded = new Uint8Array(SIMLI_CHUNK_BYTES);
+      padded.set(audioRechunkBufRef.current);
+      audioRechunkBufRef.current = new Uint8Array(0);
+      simliRef.current.sendAudioData(padded);
+    },
     getLastRenderStartMs: () => lastRenderStartMsRef.current,
     getLipSyncSamples: () => lipSyncSamplesRef.current,
     resetForInteraction: () => {
       lastRenderStartMsRef.current = 0;
       audioSentTimesRef.current = [];
       lipSyncSamplesRef.current = [];
+      audioRechunkBufRef.current = new Uint8Array(0);
     },
   }), [sendPcmToSimli]);
 
@@ -217,7 +252,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
         overflow: 'hidden',
         border: '1px solid #222',
         background: '#0a0a1a',
-        height: 260,
+        height: 420,
         flexShrink: 0,
       }}
     >
@@ -225,7 +260,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive }, r
         ref={videoRef}
         autoPlay
         playsInline
-        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
       />
       <audio ref={audioRef} autoPlay style={{ display: 'none' }} />
 

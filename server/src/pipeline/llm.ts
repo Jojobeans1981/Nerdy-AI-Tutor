@@ -98,9 +98,9 @@ export async function* streamLLM(
     model: 'llama-3.1-8b-instant',
     messages,
     stream: true,
-    max_tokens: 120,                  // Enough for 2 sentences + question without cutting off
+    max_tokens: 80,                   // Short Socratic responses — also reduces TTS first-byte latency
     temperature: 0.7,
-  });
+  }, { signal: AbortSignal.timeout(12000) }); // 12s hard timeout — prevents pipeline hang
 
   for await (const chunk of stream) {
     const token = chunk.choices[0]?.delta?.content;
