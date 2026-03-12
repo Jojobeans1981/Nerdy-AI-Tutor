@@ -451,14 +451,18 @@ function App() {
             </span>
           )}
           <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{
-              display: 'flex', alignItems: 'center', gap: 5,
-              fontSize: 11, color: ws.isConnected ? '#22c55e' : ws.isReconnecting ? '#f59e0b' : '#475569',
-            }}>
-              <span>●</span>
-              {ws.isConnected ? 'Connected' : ws.isReconnecting ? 'Reconnecting' : 'Disconnected'}
-            </span>
-            <span style={{ color: '#1e293b' }}>·</span>
+            {mic.isRecording && (
+              <>
+                <span style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  fontSize: 11, color: ws.isConnected ? '#22c55e' : ws.isReconnecting ? '#f59e0b' : '#ef4444',
+                }}>
+                  <span>●</span>
+                  {ws.isConnected ? 'Connected' : ws.isReconnecting ? 'Reconnecting' : 'Disconnected'}
+                </span>
+                <span style={{ color: '#1e293b' }}>·</span>
+              </>
+            )}
             <span style={{ fontSize: 11, color: '#475569', letterSpacing: '0.5px' }}>by Nerdy / Varsity Tutors</span>
           </span>
         </header>
