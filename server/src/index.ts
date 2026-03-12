@@ -74,6 +74,11 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     onInterim: (text) => {
       ws.send(JSON.stringify({ type: 'transcript', text, is_final: false }));
     },
+    onIsFinal: (text) => {
+      // Start answer verification early — runs during the 250ms endpointing silence
+      // window so the result is ready before _runPipeline needs it.
+      session.prefetchVerify(text);
+    },
     onFinal: (text, sttMs) => {
       // Confirm final transcript to client
       ws.send(JSON.stringify({ type: 'transcript', text, is_final: true }));

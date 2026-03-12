@@ -44,6 +44,10 @@ export class TutorSession {
   // BUG 2 FIX: store last exchange for async extraction
   private lastStudentUtterance = '';
   private fullLlmResponseText = '';
+  // Latency optimisation: verify starts on is_final (~250ms before speech_final)
+  // so by the time _runPipeline runs the promise is already resolved.
+  private prefetchedVerify: Promise<'correct' | 'incorrect' | 'unknown'> | null = null;
+  private prefetchedTranscript = '';
 
   constructor(private ws: ClientWS, private concept: string = 'fractions') {}
 
@@ -63,6 +67,18 @@ export class TutorSession {
       console.log('[Pipeline] Barge-in — aborting current pipeline');
       this.currentAbortController.abort(new Error('barge-in'));
     }
+  }
+
+  /**
+   * Called by the STT layer on is_final=true (~250ms before speech_final).
+   * Starts answer verification immediately so the result is ready when the
+   * pipeline begins — eliminating verifyStudentAnswer's ~300ms serial cost.
+   */
+  prefetchVerify(transcript: string): void {
+    if (this.isBusy) return; // don't prefetch if a pipeline is already running
+    this.prefetchedTranscript = transcript;
+    this.prefetchedVerify = verifyStudentAnswer(transcript, this.concept, this.history);
+    console.log(`[Verify] Prefetch started for: "${transcript.slice(0, 50)}"`);
   }
 
   /** Update the active concept and reset conversation history + session tracking */
@@ -152,10 +168,16 @@ export class TutorSession {
 
     tts.connect(); // non-blocking — runs in parallel with verification below
 
-    // Pre-verify the student's answer in parallel with the TTS WebSocket handshake.
-    // This adds ~0ms net latency since both operations overlap. The verdict is injected
-    // into the system prompt so the main LLM never has to judge correctness itself.
-    const answerVerdict = await verifyStudentAnswer(transcript, this.concept, this.history);
+    // Use the prefetched verify promise if it was started on is_final (~250ms ago),
+    // otherwise start it now (text_input path, or if prefetch was skipped).
+    // In the prefetch case the promise is already resolved — await is instant.
+    const verifyPromise = (this.prefetchedVerify && this.prefetchedTranscript === transcript)
+      ? this.prefetchedVerify
+      : verifyStudentAnswer(transcript, this.concept, this.history);
+    this.prefetchedVerify = null;
+    this.prefetchedTranscript = '';
+
+    const answerVerdict = await verifyPromise;
     console.log(`[Verify] transcript="${transcript.slice(0, 50)}" verdict=${answerVerdict}`);
     sessionContext.answerVerdict = answerVerdict;
 

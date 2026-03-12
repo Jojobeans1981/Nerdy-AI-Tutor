@@ -9,6 +9,12 @@ import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 export interface SttCallbacks {
   /** Fired for every interim (non-final) transcript segment */
   onInterim: (text: string) => void;
+  /**
+   * Fired when is_final=true but speech_final=false — i.e., Deepgram has committed
+   * the word boundary but the silence endpointing window hasn't elapsed yet.
+   * Fires ~250ms before onFinal, giving the pipeline a head start on any pre-work.
+   */
+  onIsFinal?: (text: string) => void;
   /** Fired once per utterance when speech_final=true. sttMs = first-audio→speech_final. */
   onFinal: (text: string, sttMs: number) => void;
   onError?: (err: unknown) => void;
@@ -36,7 +42,7 @@ export class DeepgramSTT {
       language: 'en-US',
       smart_format: true,
       interim_results: true,
-      endpointing: 300,       // ms of silence → speech_final (300ms for faster response)
+      endpointing: 250,       // ms of silence → speech_final (250ms for faster response)
       utterance_end_ms: 1500, // fallback finalizer if speech_final never fires
       vad_events: true,
       encoding: 'linear16',
@@ -84,6 +90,12 @@ export class DeepgramSTT {
       // Forward every non-empty segment as interim (includes final segments before speech_final)
       if (!speechFinal) {
         this.callbacks.onInterim(text);
+        // When is_final=true but speech_final hasn't fired yet, the text is committed —
+        // notify the pipeline so it can pre-start any work (e.g. answer verification)
+        // during the remaining ~250ms endpointing silence window.
+        if (isFinal) {
+          this.callbacks.onIsFinal?.(text);
+        }
         return;
       }
 
