@@ -2,6 +2,10 @@ import type { LatencyReport } from '../hooks/useWebSocket';
 
 interface Props {
   reports: LatencyReport[];
+  /** How long the Simli WebRTC pre-warm took (ms from mount to connected event) */
+  webRTCReadyMs: number | null;
+  /** Total number of reconnect events so far in the session */
+  reconnectCount: number;
 }
 
 function avg(nums: number[]): string {
@@ -15,15 +19,50 @@ function badge(ms: number, limit: number): string {
   return ms <= limit ? '#22c55e' : '#ef4444';
 }
 
-export function LatencyDashboard({ reports }: Props) {
+/** FIX 8: 0-100 quality score based on avg latency and reconnect count */
+function calcQualityScore(reports: LatencyReport[], reconnectCount: number): number {
+  if (reports.length === 0) return 100;
+  const last10 = reports.slice(-10);
+  const avgTotal = last10.reduce((s, r) => s + r.total_ms, 0) / last10.length;
+  const overMs = Math.max(0, avgTotal - 500);
+  const latencyPenalty = Math.floor(overMs / 100);
+  const reconnectPenalty = reconnectCount * 5;
+  return Math.max(0, Math.min(100, 100 - latencyPenalty - reconnectPenalty));
+}
+
+function qualityColor(score: number): string {
+  if (score >= 80) return '#22c55e';
+  if (score >= 50) return '#f59e0b';
+  return '#ef4444';
+}
+
+export function LatencyDashboard({ reports, webRTCReadyMs, reconnectCount }: Props) {
   const last = reports[reports.length - 1];
   const last10 = reports.slice(-10);
+  const qualityScore = calcQualityScore(reports, reconnectCount);
 
   return (
     <div className="glass" style={{ padding: 16, color: '#e2e8f0', fontSize: 12 }}>
       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#475569', marginBottom: 14 }}>
         Pipeline Latency
       </div>
+
+      {/* FIX 8: WebRTC ready time + quality score always shown */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontFamily: 'monospace', fontSize: 11 }}>
+          <span style={{ color: '#64748b' }}>WebRTC ready </span>
+          <span style={{ color: webRTCReadyMs !== null ? '#00d4ff' : '#334155' }}>
+            {webRTCReadyMs !== null ? `${webRTCReadyMs}ms` : '--'}
+          </span>
+        </div>
+        <div style={{
+          fontFamily: 'monospace', fontSize: 13, fontWeight: 700,
+          color: qualityColor(qualityScore),
+        }}>
+          Q: {qualityScore}
+        </div>
+      </div>
+
       {!last ? (
         <div style={{ color: '#334155', fontSize: 12 }}>Waiting for first interaction…</div>
       ) : (
@@ -38,6 +77,11 @@ export function LatencyDashboard({ reports }: Props) {
           </div>
           <div style={{ marginTop: 10, fontSize: 10, color: '#334155' }}>
             {reports.length} interaction{reports.length !== 1 ? 's' : ''}
+            {reconnectCount > 0 && (
+              <span style={{ color: '#f59e0b', marginLeft: 8 }}>
+                · {reconnectCount} reconnect{reconnectCount !== 1 ? 's' : ''}
+              </span>
+            )}
           </div>
         </>
       )}

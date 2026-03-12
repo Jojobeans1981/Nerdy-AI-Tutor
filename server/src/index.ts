@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, join } from 'path';
+import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -10,7 +11,7 @@ import cors from 'cors';
 import { createServer, type IncomingMessage } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DeepgramSTT } from './pipeline/stt.js';
-import { TutorSession } from './services/pipeline.js';
+import { TutorSession, getCacheHitStats } from './services/pipeline.js';
 import { getReports } from './utils/latency.js';
 import { preloadVoice } from './pipeline/tts.js';
 import { warmTtsCache, setTtsCacheVoiceId, getCacheStats } from './utils/ttsCache.js';
@@ -28,9 +29,32 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/api/latency', (_req, res) => { res.json(getReports()); });
-app.get('/api/health',  (_req, res) => { res.json({ status: 'ok', timestamp: Date.now() }); });
-app.get('/api/cache',   (_req, res) => { res.json(getCacheStats()); });
+// Per-frame lip-sync drift reports from AvatarVideo (kept in-memory, last 100)
+const lipsyncReports: { driftMs: number; sessionId?: string; timestamp: number }[] = [];
+
+app.get('/api/latency',     (_req, res) => { res.json(getReports()); });
+app.get('/api/health',     (_req, res) => { res.json({ status: 'ok', timestamp: Date.now() }); });
+app.get('/api/cache',      (_req, res) => { res.json(getCacheStats()); });
+app.get('/api/cache-stats', (_req, res) => { res.json(getCacheHitStats()); });
+
+app.post('/api/lipsync-report', (req, res) => {
+  const { driftMs, sessionId, timestamp } = req.body;
+  if (typeof driftMs === 'number') {
+    lipsyncReports.push({ driftMs, sessionId, timestamp: timestamp ?? Date.now() });
+    if (lipsyncReports.length > 100) lipsyncReports.shift();
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/lipsync-report', (_req, res) => { res.json(lipsyncReports); });
+
+// Serve built React client in production (Render deployment)
+const clientDist = join(__dirname, '../../client/dist');
+if (existsSync(clientDist)) {
+  app.use(express.static(clientDist));
+  app.get('*', (_req, res) => res.sendFile(join(clientDist, 'index.html')));
+  console.log('[Server] Serving static client from', clientDist);
+}
 
 const server = createServer(app);
 
@@ -92,6 +116,10 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
             console.error('[Pipeline] Error:', err);
             ws.send(JSON.stringify({ type: 'error', message: 'Pipeline error' }));
           });
+          return;
+        }
+        if (msg.type === 'interrupt') {
+          session.interrupt();
           return;
         }
         if (msg.type === 'avatar_rendered') {

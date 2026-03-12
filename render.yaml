@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nerdy-ai-tutor
+    runtime: node
+    buildCommand: "cd client && npm install && npm run build && cd ../server && npm install && npm run build"
+    startCommand: "cd server && npm start"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: CARTESIA_API_KEY
+        sync: false
+      - key: CARTESIA_VOICE_ID
+        sync: false

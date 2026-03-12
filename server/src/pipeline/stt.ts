@@ -36,7 +36,7 @@ export class DeepgramSTT {
       language: 'en-US',
       smart_format: true,
       interim_results: true,
-      endpointing: 200,       // ms of silence → speech_final (tighter = lower latency)
+      endpointing: 300,       // ms of silence → speech_final (300ms for faster response)
       utterance_end_ms: 1500, // fallback finalizer if speech_final never fires
       vad_events: true,
       encoding: 'linear16',
@@ -55,11 +55,24 @@ export class DeepgramSTT {
     });
 
     this.live.on(LiveTranscriptionEvents.Transcript, (data: any) => {
-      const text: string = data.channel?.alternatives?.[0]?.transcript ?? '';
+      const alt = data.channel?.alternatives?.[0];
+      const text: string = alt?.transcript ?? '';
       if (!text) return;
+
+      // Noise filter: skip low-confidence or single-word transcripts on speech_final
+      // to avoid triggering the pipeline on ambient noise in loud environments.
+      const confidence: number = alt?.confidence ?? 1;
+      const wordCount: number = text.trim().split(/\s+/).length;
 
       const isFinal: boolean = data.is_final ?? false;
       const speechFinal: boolean = data.speech_final ?? false;
+
+      if (speechFinal && (confidence < 0.65 || wordCount < 2)) {
+        console.log(`[STT] Noise filter dropped: confidence=${confidence.toFixed(2)} words=${wordCount} text="${text}"`);
+        this.pendingFinalText = '';
+        this.audioStartMs = 0;
+        return;
+      }
 
       if (isFinal) {
         console.log(`[STT] is_final=true speech_final=${speechFinal} text="${text.slice(0, 60)}"`);

@@ -23,6 +23,14 @@ const CACHE_PHRASES = [
   "You've got it!",
   "Nice work!",
   "Close!",
+  "That's interesting — let's think about that.",
+  "Good effort! What do you think would happen if",
+  "Let's back up for a second.",
+  "You're on the right track. Can you tell me more about",
+  "Hmm, what makes you say that?",
+  "That's a tricky part — let's look at it differently.",
+  "Almost! What if we tried",
+  "Great question. What do you already know about",
 ];
 
 /** Map of phrase → base64 PCM audio chunks (16kHz, s16le) */
@@ -80,9 +88,34 @@ export async function warmTtsCache(): Promise<void> {
     }
   }
 
-  console.log(`[TTS Cache] Warm complete in ${Date.now() - start}ms. ${cache.size}/${CACHE_PHRASES.length} phrases cached.`);
+  console.log(`[TTS Cache] Pre-synthesized ${cache.size} phrases (${Date.now() - start}ms total, ${CACHE_PHRASES.length - cache.size} failed).`);
 }
 
 export function getCacheStats(): { size: number; phrases: string[] } {
   return { size: cache.size, phrases: [...cache.keys()] };
+}
+
+/**
+ * Look up a pre-synthesized audio buffer by text.
+ * Normalizes the lookup: trims whitespace, lowercases, strips trailing punctuation
+ * so minor LLM formatting differences still hit the cache.
+ *
+ * Returns the cached Buffer if found, or null if not cached.
+ */
+export function lookupTtsCache(text: string): Buffer | null {
+  const normalize = (s: string) =>
+    s.trim().toLowerCase().replace(/[.!?,]+$/, '').replace(/\s+/g, ' ');
+
+  const key = normalize(text);
+
+  // Check exact normalized match first
+  for (const [cached, chunks] of cache.entries()) {
+    if (normalize(cached) === key) return Buffer.from(chunks.join(''), 'base64');
+  }
+
+  // NOTE: "starts with" partial matching is intentionally disabled —
+  // returning only the opener phrase audio while skipping synthesis of
+  // the rest of the response causes audible cut-off after 2-3 words.
+
+  return null;
 }

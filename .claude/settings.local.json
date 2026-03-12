@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.cartesia.ai)",
+      "WebFetch(domain:play.cartesia.ai)",
+      "Bash(curl -s \"https://api.cartesia.ai/voices\" -H \"X-API-Key: sk_car_GWRhVsrzdAdzSikZSnEEVE\" -H \"Cartesia-Version: 2024-06-10\")",
+      "Bash(node -e \"const d=require\\(''fs''\\).readFileSync\\(''/dev/stdin'',''utf8''\\); const v=JSON.parse\\(d\\); v.filter\\(x=>x.language===''en''&&x.is_public\\).forEach\\(x=>console.log\\(x.id, x.name, x.description?.substring\\(0,50\\)??''''\\)\\)\")",
+      "Bash(curl -s \"https://api.cartesia.ai/voices\" -H \"X-API-Key: sk_car_GWRhVsrzdAdzSikZSnEEVE\" -H \"Cartesia-Version: 2024-06-10\" -o voices.json)",
+      "Bash(node -e \"const v=require\\(''./voices.json''\\); v.filter\\(x=>x.language===''en''&&x.is_public\\).forEach\\(x=>console.log\\(x.id,''|'',x.name,''|'',x.description?.substring\\(0,60\\)??''''\\)\\)\")",
+      "Bash(del voices.json)",
+      "Bash(npx tsc --noEmit)"
+    ]
+  }
+}

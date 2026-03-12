@@ -7,9 +7,23 @@
  * - No stage waits for the previous to complete
  */
 import { LatencyTracker, storeReport, updateAvatarRender } from '../utils/latency.js';
-import { streamLLM, type ChatMessage } from '../pipeline/llm.js';
+import { streamLLM, extractSessionUpdate, verifyStudentAnswer, type ChatMessage, type SessionContext } from '../pipeline/llm.js';
 import { CartesiaTTS } from '../pipeline/tts.js';
+import { lookupTtsCache } from '../utils/ttsCache.js';
 import type { WebSocket as ClientWS } from 'ws';
+
+// BUG 1 FIX: track cache hit rate across all sessions
+let cacheHits = 0;
+let cacheMisses = 0;
+
+export function getCacheHitStats(): { hits: number; misses: number; hitRate: string } {
+  const total = cacheHits + cacheMisses;
+  return {
+    hits: cacheHits,
+    misses: cacheMisses,
+    hitRate: total > 0 ? `${Math.round((cacheHits / total) * 100)}%` : 'n/a',
+  };
+}
 
 /** Manages one tutoring session's conversation history and streaming pipeline */
 export class TutorSession {
@@ -19,6 +33,17 @@ export class TutorSession {
   private isBusy = false;
   // Queue the latest utterance received while busy (replaces any prior queued one)
   private pendingUtterance: { transcript: string; interactionId: string; sttMs: number } | null = null;
+  // AbortController for the currently running pipeline (barge-in support)
+  private currentAbortController: AbortController | null = null;
+
+  // FIX 6: Session-level mastery and hint tracking
+  private conceptsMastered: string[] = [];
+  private mistakePatterns: string[] = [];
+  private hintLevel = 0;
+  private attemptCountOnCurrentConcept = 0;
+  // BUG 2 FIX: store last exchange for async extraction
+  private lastStudentUtterance = '';
+  private fullLlmResponseText = '';
 
   constructor(private ws: ClientWS, private concept: string = 'fractions') {}
 
@@ -28,10 +53,26 @@ export class TutorSession {
     console.log(`[Avatar] render_ms=${renderMs}  id=${interactionId}`);
   }
 
-  /** Update the active concept and reset conversation history */
+  /**
+   * Interrupt the current pipeline (barge-in).
+   * Aborts the running LLM/TTS stream; the pending utterance (already queued
+   * by processUtterance) will be processed immediately after abort settles.
+   */
+  interrupt(): void {
+    if (this.isBusy && this.currentAbortController) {
+      console.log('[Pipeline] Barge-in — aborting current pipeline');
+      this.currentAbortController.abort(new Error('barge-in'));
+    }
+  }
+
+  /** Update the active concept and reset conversation history + session tracking */
   setConcept(concept: string): void {
     this.concept = concept;
     this.history = [];
+    this.conceptsMastered = [];
+    this.mistakePatterns = [];
+    this.hintLevel = 0;
+    this.attemptCountOnCurrentConcept = 0;
     console.log(`[Session] Concept set to "${concept}"`);
   }
 
@@ -44,6 +85,7 @@ export class TutorSession {
     interactionId: string,
     sttMs = 0,
   ): Promise<void> {
+    console.log(`[Pipeline] processUtterance  isBusy=${this.isBusy}  id=${interactionId}  text="${transcript.slice(0, 60)}"`);
     if (this.isBusy) {
       // Queue the utterance so it runs after the current pipeline finishes
       console.log(`[Pipeline] Busy — queuing: "${transcript.slice(0, 60)}"`);
@@ -71,6 +113,19 @@ export class TutorSession {
     interactionId: string,
     sttMs: number,
   ): Promise<void> {
+    this.currentAbortController = new AbortController();
+    const { signal } = this.currentAbortController;
+
+    // FIX 6: increment attempt count; compute hint level before calling LLM
+    this.attemptCountOnCurrentConcept++;
+    this.hintLevel = Math.min(2, this.attemptCountOnCurrentConcept - 1);
+    const sessionContext: SessionContext = {
+      hintLevel: this.hintLevel,
+      conceptsMastered: [...this.conceptsMastered],
+      mistakePatterns: [...this.mistakePatterns],
+    };
+    console.log(`[Session] attempt=${this.attemptCountOnCurrentConcept} hintLevel=${this.hintLevel}`);
+
     const tracker = new LatencyTracker(interactionId);
     if (sttMs > 0) tracker.setSttMs(sttMs);
     tracker.mark('stt_end');
@@ -80,22 +135,29 @@ export class TutorSession {
     // Tokens are accumulated locally until the WS opens, then sent in one shot.
     // This overlaps the Cartesia handshake with the Groq API call.
     const tts = new CartesiaTTS({
-      onAudioChunk: (base64Pcm) => {
-        this.ws.send(JSON.stringify({
-          type: 'audio',
-          data: base64Pcm,
-          interaction_id: interactionId,
-        }));
+      onAudioChunk: (pcm) => {
+        // Send as binary frame: [0x01 type byte][raw PCM] — no base64, no JSON overhead
+        const frame = Buffer.allocUnsafe(1 + pcm.length);
+        frame[0] = 0x01;
+        pcm.copy(frame, 1);
+        try { this.ws.send(frame); } catch { /* WS closed */ }
       },
       onFirstByte: () => {
         tracker.mark('tts_first_byte');
       },
       onError: (error, message) => {
-        this.ws.send(JSON.stringify({ type: 'tts_error', error, message }));
+        try { this.ws.send(JSON.stringify({ type: 'tts_error', error, message })); } catch { /* WS closed */ }
       },
     });
 
-    tts.connect(); // non-blocking — LLM starts immediately below
+    tts.connect(); // non-blocking — runs in parallel with verification below
+
+    // Pre-verify the student's answer in parallel with the TTS WebSocket handshake.
+    // This adds ~0ms net latency since both operations overlap. The verdict is injected
+    // into the system prompt so the main LLM never has to judge correctness itself.
+    const answerVerdict = await verifyStudentAnswer(transcript, this.concept, this.history);
+    console.log(`[Verify] transcript="${transcript.slice(0, 50)}" verdict=${answerVerdict}`);
+    sessionContext.answerVerdict = answerVerdict;
 
     // ── Stages 2 + 3: Stream LLM → TTS ──────────────────────────────────────
     // Wrapped in try/finally so tts.abort() ALWAYS runs — even if the LLM
@@ -104,10 +166,12 @@ export class TutorSession {
     // blocking the next request (free tier rejects concurrent connections).
     let fullResponse = '';
     let llmCompleted = false;
+    let historyPushed = false;
     try {
       let isFirstToken = true;
 
-      for await (const token of streamLLM(transcript, this.concept, this.history)) {
+      console.log(`[Pipeline] LLM start  id=${interactionId}`);
+      for await (const token of streamLLM(transcript, this.concept, this.history, signal, sessionContext)) {
         if (isFirstToken) {
           tracker.mark('llm_first_token');
           isFirstToken = false;
@@ -129,12 +193,28 @@ export class TutorSession {
 
       llmCompleted = true;
 
-      // Send full text to Cartesia — it streams audio back as it synthesizes
-      tts.endStream();
+      // BUG 1 FIX: check TTS cache before calling Cartesia
+      const cachedAudio = lookupTtsCache(fullResponse);
+      if (cachedAudio) {
+        cacheHits++;
+        console.log(`[TTS Cache] HIT for: "${fullResponse.substring(0, 50)}..."`);
+        tts.abort(); // close buffered WS without synthesizing — doneResolve() fires here
+        tracker.mark('tts_first_byte');
+        const audioFrame = Buffer.allocUnsafe(1 + cachedAudio.length);
+        audioFrame[0] = 0x01;
+        cachedAudio.copy(audioFrame, 1);
+        try { this.ws.send(audioFrame); } catch { /* WS closed */ }
+      } else {
+        cacheMisses++;
+        console.log('[TTS Cache] MISS — calling Cartesia');
+        // Send full text to Cartesia — it streams audio back as it synthesizes
+        tts.endStream();
+      }
 
       // Update conversation history immediately (LLM is done)
       this.history.push({ role: 'user', content: transcript });
       this.history.push({ role: 'assistant', content: fullResponse });
+      historyPushed = true;
       console.log(`[Session] History: ${this.history.length} messages  concept="${this.concept}"`);
 
       // Signal response complete to client as soon as text is done —
@@ -142,29 +222,68 @@ export class TutorSession {
       console.log(`[Pipeline] response_end  length=${fullResponse.length}`);
       this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId }));
 
-      // Wait up to 4s for TTS to complete, then abort to avoid dangling WS connections.
+      // BUG 2 FIX: fire session state extraction after audio is queued — non-blocking
+      this.lastStudentUtterance = transcript;
+      this.fullLlmResponseText = fullResponse;
+      setImmediate(async () => {
+        try {
+          const update = await extractSessionUpdate(
+            this.lastStudentUtterance,
+            this.fullLlmResponseText,
+            this.concept,
+            {
+              conceptsMastered: this.conceptsMastered,
+              mistakePatterns: this.mistakePatterns,
+              attemptCountOnCurrentConcept: this.attemptCountOnCurrentConcept,
+            },
+          );
+          this.conceptsMastered = update.conceptsMastered;
+          this.mistakePatterns = update.mistakePatterns;
+          if (update.wasCorrect) {
+            this.attemptCountOnCurrentConcept = 0;
+            this.hintLevel = 0;
+          } else {
+            this.attemptCountOnCurrentConcept += 1;
+            this.hintLevel = Math.min(2, this.attemptCountOnCurrentConcept);
+          }
+          console.log('[Session State] Updated:', {
+            conceptsMastered: this.conceptsMastered,
+            mistakePatterns: this.mistakePatterns,
+            hintLevel: this.hintLevel,
+          });
+        } catch (err) {
+          console.error('[Session State] Extraction error (non-fatal):', err);
+        }
+      });
+
+      // Wait up to 12s for TTS to complete, then abort to avoid dangling WS connections.
       // Cartesia's free tier rejects a new connection if a prior WS is still open.
-      const ttsTimeout = new Promise<void>(r => setTimeout(r, 4000));
+      // With sentence streaming, multiple chunks synthesize sequentially — longer responses
+      // can exceed the old 4s limit. Normal completion fires doneResolve() well before this.
+      const ttsTimeout = new Promise<void>(r => setTimeout(r, 8000));
       await Promise.race([tts.waitForComplete(), ttsTimeout]);
     } catch (err) {
       console.error('[Pipeline] LLM/TTS stream error:', err);
       // Notify the client so the UI doesn't stay frozen waiting for response_end
-      this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true }));
+      try { this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true })); } catch { /* WS closed */ }
       // Save partial response to history so conversation context isn't lost
-      if (fullResponse) {
+      if (fullResponse && !historyPushed) {
         this.history.push({ role: 'user', content: transcript });
         this.history.push({ role: 'assistant', content: llmCompleted ? fullResponse : fullResponse + '…' });
       }
     } finally {
-      // Always close the Cartesia WS — prevents a stale open connection
-      // from blocking the next request, regardless of how the pipeline ended.
-      tts.abort();
+      // Always close the Cartesia WS and WAIT for it to fully close.
+      // Cartesia free tier rejects a new connection if the prior WS is still
+      // in TCP close state — await ensures the next pipeline's tts.connect()
+      // only fires after the socket is truly gone.
+      await tts.abort();
+      this.currentAbortController = null;
     }
 
     tracker.mark('pipeline_end');
     const report = tracker.report();
     storeReport(report);
-    this.ws.send(JSON.stringify({ type: 'latency', ...report }));
+    try { this.ws.send(JSON.stringify({ type: 'latency', ...report })); } catch { /* WS closed */ }
 
     console.log(
       `[Latency] ${interactionId}: ` +

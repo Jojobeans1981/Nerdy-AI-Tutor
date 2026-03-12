@@ -13,7 +13,12 @@ interface Message {
   text: string;
 }
 
-const WS_URL = (concept: string) => `ws://${window.location.hostname}:3001/ws/session?concept=${concept}`;
+const WS_URL = (concept: string) => {
+  const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+  const proto = isLocal ? 'ws' : 'wss';
+  const host = isLocal ? `${window.location.hostname}:3001` : window.location.host;
+  return `${proto}://${host}/ws/session?concept=${concept}`;
+};
 
 function App() {
   const [topic, setTopic] = useState<string | null>(null);
@@ -24,6 +29,8 @@ function App() {
   const [isAvatarActive, setIsAvatarActive] = useState(false);
   const [micDeviceId, setMicDeviceId] = useState<string | null>(null);
   const [textInput, setTextInput] = useState('');
+  // True while STT has fired but no AI tokens have arrived yet
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const streamingTextRef = useRef('');
   // True while the AI pipeline is actively streaming tokens.
@@ -32,12 +39,86 @@ function App() {
   const isAiRespondingRef = useRef(false);
   const avatarRef = useRef<AvatarVideoHandle>(null);
   const speakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stable ref to the speaking-done callback so both onAudio and response_end
+  // can schedule it without duplicating code. Set once after component mounts.
+  const speakingDoneRef = useRef<(() => void) | null>(null);
   // Set true when response_end arrives so trailing audio chunks (still in-flight
   // from the Cartesia stream) don't reset the 8s watchdog and extend "Speaking".
   const responseEndedRef = useRef(false);
+  // Track the current interaction ID (set on first token) for avatar render reporting
+  const currentInteractionIdRef = useRef('');
+  // Half-duplex gate: true while AI is responding + brief settle window after.
+  // Prevents TTS echo (speaker → mic) from reaching Deepgram and corrupting its
+  // VAD state, which causes speech_final to never fire on the next utterance.
+  const micMutedRef = useRef(false);
+  const micUnmuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Manual mute toggle — user-controlled, independent of the half-duplex gate.
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const manualMuteRef = useRef(false);
+  // FIX 8: WebRTC pre-warm timing and reconnect tracking for LatencyDashboard
+  const [webRTCReadyMs, setWebRTCReadyMs] = useState<number | null>(null);
+  const [reconnectCount, setReconnectCount] = useState(0);
+  // Web Audio API fallback: plays raw PCM when Simli WebRTC isn't connected yet
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const simliReadyRef = useRef(false);
+  // True once any audio frame arrives for the current response
+  const audioReceivedRef = useRef(false);
+  // Non-null when the last response had no audio (shows warning banner)
+  const [audioMissed, setAudioMissed] = useState(false);
+
+  // Keep ref in sync so audio callback (closure) always sees latest value
+  useEffect(() => { manualMuteRef.current = isMicMuted; }, [isMicMuted]);
 
   const ws = useWebSocket(topic ? WS_URL(topic) : WS_URL('fractions'));
   const mic = useMicrophone();
+
+  // FIX 8: accumulate total reconnects across the session lifetime
+  const prevReconnectAttemptsRef = useRef(0);
+  useEffect(() => {
+    if (ws.reconnectAttempts > prevReconnectAttemptsRef.current) {
+      setReconnectCount(c => c + (ws.reconnectAttempts - prevReconnectAttemptsRef.current));
+    }
+    prevReconnectAttemptsRef.current = ws.reconnectAttempts;
+  }, [ws.reconnectAttempts]);
+
+  // On WS reconnect during an active session: reset all mic-gate and pipeline state.
+  // Root cause: if the WS drops mid-response (server restart, network blip), micMutedRef
+  // can be true with no timers running to unmute it. The new server session knows nothing
+  // about the old response, so no response_end or audio ever arrives — mic stays muted forever.
+  const prevIsConnectedRef = useRef(false);
+  useEffect(() => {
+    const reconnected = ws.isConnected && !prevIsConnectedRef.current;
+    prevIsConnectedRef.current = ws.isConnected;
+    if (reconnected && mic.isRecording) {
+      console.warn('[Mic] WS reconnected mid-session — resetting pipeline state');
+      if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
+      if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+      isAiRespondingRef.current = false;
+      responseEndedRef.current = false;
+      streamingTextRef.current = '';
+      setStreamingText('');
+      setIsProcessing(false);
+      setIsAvatarActive(false);
+      micMutedRef.current = false;
+      console.log('[Mic] Unmuted — WS reconnect reset');
+    }
+  }, [ws.isConnected, mic.isRecording]);
+
+  // 5s watchdog: force-unmute if mic is stuck muted while AI is not actively responding.
+  // Catches all edge cases (WS drops, TTS failures, timer race conditions) with a max
+  // "stuck" window of 5s. Condition: muted + AI not streaming tokens = safe to unmute.
+  useEffect(() => {
+    if (!mic.isRecording) return;
+    const watchdog = setInterval(() => {
+      if (micMutedRef.current && !isAiRespondingRef.current) {
+        console.warn('[Watchdog] Mic stuck muted — AI not responding — force unmuting');
+        if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
+        if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+        micMutedRef.current = false;
+      }
+    }, 5000);
+    return () => clearInterval(watchdog);
+  }, [mic.isRecording]);
 
   useEffect(() => {
     ws.onMessage((msg) => {
@@ -58,49 +139,43 @@ function App() {
             if (!isAiRespondingRef.current) {
               setStreamingText('');
               streamingTextRef.current = '';
+              // Show "Processing…" until the first AI token arrives
+              setIsProcessing(true);
             }
           } else if (!msg.is_final) {
             setInterimTranscript(msg.text || '');
           }
           break;
 
-        case 'token':
+        case 'token': {
+          const isFirstToken = !isAiRespondingRef.current;
           isAiRespondingRef.current = true;
+          setIsProcessing(false); // first token arrived — clear spinner
           responseEndedRef.current = false; // new response starting
+          audioReceivedRef.current = false; // reset audio-received flag for this response
+          setAudioMissed(false);
+          currentInteractionIdRef.current = msg.interaction_id ?? currentInteractionIdRef.current;
+          // Mute mic on first token — TTS echo will start arriving soon
+          micMutedRef.current = true;
+          if (isFirstToken) {
+            // Safety unmute: if response_end is ever lost (e.g. WS drop mid-pipeline),
+            // this guarantees the mic unmutes within 8s regardless.
+            // The response_end handler's 1.5s timer replaces this in the normal flow.
+            if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
+            micUnmuteTimerRef.current = setTimeout(() => {
+              console.warn('[Mic] Safety unmute fired — response_end may have been lost');
+              micMutedRef.current = false;
+            }, 8000);
+            console.log('[Mic] Muted — response started');
+          }
           streamingTextRef.current += msg.text;
           setStreamingText(streamingTextRef.current);
           break;
-
-        case 'audio':
-          // Push PCM audio directly to Simli via imperative handle — no state update,
-          // no re-render, no queue accumulation. This is the low-latency path.
-          setIsAvatarActive(true);
-          // Only reset the 8s watchdog while the response is still in-flight.
-          // After response_end arrives, audio chunks are tail-end Cartesia frames
-          // already in the network buffer — don't let them extend "Speaking" by 8s.
-          if (!responseEndedRef.current) {
-            if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
-            speakingTimeoutRef.current = setTimeout(() => setIsAvatarActive(false), 8000);
-          }
-          avatarRef.current?.sendAudio(msg.data);
-          // Report avatar render latency: time from first audio chunk sent → Simli starts rendering.
-          // Simli begins video output within ~1-2 frames of receiving the first PCM chunk.
-          // We approximate render latency as ~33ms (one frame at 30fps) after first audio sent.
-          if (msg.interaction_id && avatarRef.current) {
-            const audioSentMs = avatarRef.current.getLastRenderStartMs();
-            if (audioSentMs > 0) {
-              const renderMs = Date.now() - audioSentMs + 33; // +1 frame for render pipeline
-              ws.sendJson({
-                type: 'avatar_rendered',
-                interaction_id: msg.interaction_id,
-                render_ms: renderMs,
-              });
-            }
-          }
-          break;
+        }
 
         case 'response_end': {
           isAiRespondingRef.current = false;
+          setIsProcessing(false); // clear in case LLM errored before sending any token
           // Capture NOW — React updater functions run async, so reading the ref
           // inside setMessages would see the already-cleared value ("").
           const finalText = streamingTextRef.current;
@@ -125,14 +200,35 @@ function App() {
             });
             console.log(`[LipSync] avg=${avgOffset}ms max=${maxOffset}ms samples=${samples.length}`);
           }
-          // Flush the rechunk buffer so the last partial frame (tail audio) is
-          // sent to Simli and the avatar finishes animating the final syllables.
-          avatarRef.current?.flushAudio();
-          avatarRef.current?.resetForInteraction();
-          // Mark response as ended so trailing audio chunks don't re-arm the 8s watchdog
+          // Reset timing + lip-sync stats for the next interaction.
+          // Do NOT flush or clear the rechunk buffer here — Cartesia audio
+          // chunks are still in-flight after response_end (LLM finishes before
+          // TTS). Flushing here inserts a zero-padded silence frame mid-speech,
+          // causing audible choppiness. The speaking timeout handles the flush.
+          avatarRef.current?.resetStats();
+          // Detect audio failure: check 2.5s after response_end, not immediately.
+          // Audio binary frames often arrive AFTER response_end (TTS still streaming),
+          // so checking at response_end gives a false positive on every response.
+          setTimeout(() => {
+            if (!audioReceivedRef.current) {
+              console.warn('[Audio] No audio received 2.5s after response_end — possible TTS failure');
+              setAudioMissed(true);
+            }
+          }, 2500);
+          // Mark response as ended — trailing audio chunks will now use the 3s timer
+          // instead of the 8s watchdog (see ws.onAudio handler).
           responseEndedRef.current = true;
-          if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
-          speakingTimeoutRef.current = setTimeout(() => setIsAvatarActive(false), 1000);
+          // Fast-forward any 8s watchdog that was set before response_end arrived.
+          // Audio often arrives before response_end (sentence streaming), so the
+          // watchdog was set to 8s. Now that we know the response is done, reset
+          // it to 3s so the "Speaking" state clears promptly.
+          if (speakingTimeoutRef.current) {
+            clearTimeout(speakingTimeoutRef.current);
+            speakingTimeoutRef.current = setTimeout(() => speakingDoneRef.current?.(), 1500);
+          }
+          // No-audio case: if TTS fails entirely and no audio arrives, the 8s safety
+          // timer set on first token handles unmute. The fast-forward above handles
+          // exchanges where audio was already in-flight before response_end arrived.
           break;
         }
 
@@ -152,10 +248,101 @@ function App() {
     });
   }, [ws]);
 
+  // Stable speaking-done callback — called 1.5s after the last TTS audio chunk.
+  // This is the PRIMARY mic unmute path. Unmuting here (not at response_end) ensures
+  // TTS audio has truly finished playing before the mic opens, preventing echo transcription.
+  useEffect(() => {
+    speakingDoneRef.current = () => {
+      // Null out the speaking timeout ref so response_end's fast-forward block
+      // doesn't fire speakingDone prematurely on the NEXT exchange.
+      speakingTimeoutRef.current = null;
+      setIsAvatarActive(false);
+      avatarRef.current?.flushAudio();
+      avatarRef.current?.resetForInteraction();
+      // Unmute mic — TTS is done (1.5s of silence after last audio chunk)
+      if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
+      micUnmuteTimerRef.current = null;
+      micMutedRef.current = false;
+      console.log('[Mic] Unmuted — speaking done (TTS finished)');
+    };
+  });
+
+  // Binary audio path — raw PCM arrives as Uint8Array (no base64, no JSON parse overhead)
+  useEffect(() => {
+    ws.onAudio((pcm) => {
+      setIsAvatarActive(true);
+      audioReceivedRef.current = true;
+      // Reset the speaking timer on each chunk.
+      // Before response_end: 8s watchdog.  After response_end: 1.5s.
+      if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+      speakingTimeoutRef.current = setTimeout(
+        () => speakingDoneRef.current?.(),
+        responseEndedRef.current ? 1500 : 8000,
+      );
+
+      if (simliReadyRef.current) {
+        // Simli WebRTC connected — route audio through avatar (lip-sync + video)
+        avatarRef.current?.sendAudio(pcm);
+        // Report render latency on first audio chunk of each interaction
+        const audioSentMs = avatarRef.current?.getLastRenderStartMs() ?? 0;
+        if (audioSentMs > 0 && currentInteractionIdRef.current) {
+          const renderMs = Date.now() - audioSentMs + 33;
+          ws.sendJson({ type: 'avatar_rendered', interaction_id: currentInteractionIdRef.current, render_ms: renderMs });
+        }
+      } else {
+        // Simli not ready yet — play raw PCM directly via Web Audio API so voice works
+        try {
+          if (!audioCtxRef.current) {
+            audioCtxRef.current = new AudioContext({ sampleRate: 16000 });
+          }
+          const ctx = audioCtxRef.current;
+          // PCM is 16-bit signed LE — convert to Float32
+          const samples = pcm.length / 2;
+          const audioBuffer = ctx.createBuffer(1, samples, 16000);
+          const channel = audioBuffer.getChannelData(0);
+          const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+          for (let i = 0; i < samples; i++) {
+            channel[i] = view.getInt16(i * 2, true) / 32768;
+          }
+          const src = ctx.createBufferSource();
+          src.buffer = audioBuffer;
+          src.connect(ctx.destination);
+          src.start();
+        } catch (e) {
+          console.warn('[Audio fallback] playback error:', e);
+        }
+      }
+    });
+  }, [ws]);
+
   const handleStart = useCallback(async () => {
+    // Full reset of all pipeline state — covers fresh starts and topic-change-then-restart.
+    // Prevents stale refs from a previous session bleeding into the new one.
+    isAiRespondingRef.current = false;
+    responseEndedRef.current = false;
+    audioReceivedRef.current = false;
+    streamingTextRef.current = '';
+    setStreamingText('');
+    setIsProcessing(false);
+    setIsAvatarActive(false);
+    setAudioMissed(false);
+    if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
+    micMutedRef.current = false;
+    if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+    // Satisfy browser autoplay policy — must be called from within a user gesture handler.
+    // Simli pre-warms before any interaction, so the audio/video elements need an explicit
+    // .play() triggered by this click to avoid "NotAllowedError: play() failed" errors.
+    avatarRef.current?.unlockAudio();
     ws.connect();
     setTimeout(async () => {
+      let _warnedDropped = false;
       await mic.startRecording((audioData) => {
+        if (micMutedRef.current) {
+          if (!_warnedDropped) { console.warn('[Mic] Audio dropped — micMuted=true'); _warnedDropped = true; }
+          return;
+        }
+        _warnedDropped = false;
+        if (manualMuteRef.current) return;
         ws.sendAudio(audioData);
       }, micDeviceId);
     }, 500);
@@ -166,14 +353,33 @@ function App() {
     ws.disconnect();
   }, [mic, ws]);
 
+  const handleBargeIn = useCallback(() => {
+    // Immediately stop the AI response on client
+    isAiRespondingRef.current = false;
+    setIsProcessing(false);
+    responseEndedRef.current = true;
+    streamingTextRef.current = '';
+    setStreamingText('');
+    if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
+    speakingTimeoutRef.current = null; // prevent stale-ref fast-forward on next exchange
+    setIsAvatarActive(false);
+    avatarRef.current?.resetForInteraction();
+    // Unmute mic immediately so user can speak right away
+    if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
+    micUnmuteTimerRef.current = null;
+    micMutedRef.current = false;
+    // Tell server to abort the current pipeline
+    ws.sendJson({ type: 'interrupt' });
+  }, [ws]);
+
   // Queue for messages typed before WS is ready
   const pendingTextRef = useRef<string | null>(null);
 
   // When WS connects, flush any pending text message
   useEffect(() => {
     if (ws.isConnected && pendingTextRef.current) {
-      ws.sendJson({ type: 'text_input', text: pendingTextRef.current });
-      pendingTextRef.current = null;
+      const sent = ws.sendJsonReliable({ type: 'text_input', text: pendingTextRef.current });
+      if (sent) pendingTextRef.current = null;
     }
   }, [ws.isConnected, ws]);
 
@@ -183,10 +389,11 @@ function App() {
     // Show user message immediately in the chat
     setMessages((prev) => [...prev, { role: 'user', text }]);
     setTextInput('');
-    if (ws.isConnected) {
-      ws.sendJson({ type: 'text_input', text });
-    } else {
-      // Auto-start session; the effect above will send once connected
+    // Use sendJsonReliable — checks actual WS readyState, not stale React state.
+    // If the socket isn't open (dropped between renders), queue and reconnect.
+    const sent = ws.sendJsonReliable({ type: 'text_input', text });
+    if (!sent) {
+      console.warn('[Text] WS not ready — queuing and connecting');
       pendingTextRef.current = text;
       ws.connect();
     }
@@ -224,6 +431,21 @@ function App() {
               color: '#00d4ff', padding: '3px 10px', borderRadius: 20,
             }}>{topicLabel}</span>
           )}
+          {/* FIX 7: reconnect indicator */}
+          {ws.isReconnecting && (
+            <span style={{
+              marginLeft: 8, fontSize: 11, fontWeight: 600,
+              color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <span style={{ animation: 'pulse 1s infinite' }}>●</span>
+              Reconnecting… ({ws.reconnectAttempts}/5)
+            </span>
+          )}
+          {ws.reconnectAttempts >= 5 && !ws.isConnected && (
+            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#ef4444' }}>
+              Connection lost. Please refresh the page.
+            </span>
+          )}
           <span style={{ fontSize: 11, color: '#475569', marginLeft: 'auto', letterSpacing: '0.5px' }}>
             by Nerdy / Varsity Tutors
           </span>
@@ -257,7 +479,7 @@ function App() {
               <p style={{ color: '#64748b', fontSize: 15, marginBottom: 52, maxWidth: 460 }}>
                 Pick a topic and start talking. Your AI tutor guides you with questions — never just giving you the answer.
               </p>
-              <TopicSelector selected={topic} onSelect={setTopic} />
+              <TopicSelector selected={topic} onSelect={(t) => { avatarRef.current?.unlockAudio(); setTopic(t); }} />
             </div>
           )}
 
@@ -273,11 +495,33 @@ function App() {
 
             {/* Left */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
-              <AvatarVideo ref={avatarRef} isActive={isAvatarActive} />
+              <AvatarVideo
+                ref={avatarRef}
+                isActive={isAvatarActive}
+                onWebRTCReady={(ms) => {
+                  setWebRTCReadyMs(ms);
+                  simliReadyRef.current = true;
+                }}
+              />
 
               <div className="glass" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
                 <ChatDisplay messages={messages} interimTranscript={interimTranscript} streamingText={streamingText} />
               </div>
+
+              {/* Audio failure warning */}
+              {audioMissed && (
+                <div style={{
+                  padding: '8px 14px', borderRadius: 8, flexShrink: 0,
+                  background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)',
+                  color: '#fca5a5', fontSize: 12, display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <span>⚠️ No audio received — the tutor's last response may not have played. Check your volume or network.</span>
+                  <button
+                    onClick={() => setAudioMissed(false)}
+                    style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
+                  >×</button>
+                </div>
+              )}
 
               {/* Controls */}
               <div className="glass" style={{ padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 8, flexShrink: 0 }}>
@@ -334,18 +578,54 @@ function App() {
                       </div>
                       <span style={{
                         fontSize: 11, fontWeight: 600,
-                        color: mic.audioLevel > 0.05 ? '#22c55e' : '#475569',
+                        color: isProcessing ? '#f59e0b' : mic.audioLevel > 0.05 ? '#22c55e' : '#475569',
                         transition: 'color 0.2s',
                       }}>
-                        {mic.audioLevel > 0.05 ? 'Listening...' : 'Speak now'}
+                        {isProcessing ? 'Processing…' : mic.audioLevel > 0.05 ? 'Listening...' : 'Speak now'}
                       </span>
                     </div>
+                  )}
+
+                  {/* Mic mute toggle */}
+                  {mic.isRecording && (
+                    <button
+                      onClick={() => setIsMicMuted(m => !m)}
+                      title={isMicMuted ? 'Unmute microphone' : 'Mute microphone'}
+                      style={{
+                        padding: '6px 12px', borderRadius: 8, border: 'none',
+                        cursor: 'pointer', fontWeight: 600, fontSize: 12,
+                        background: isMicMuted ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.06)',
+                        color: isMicMuted ? '#ef4444' : '#94a3b8',
+                        display: 'flex', alignItems: 'center', gap: 5,
+                      }}
+                    >
+                      {isMicMuted ? '🔇' : '🎤'}
+                      {isMicMuted ? 'Muted' : 'Mic'}
+                    </button>
+                  )}
+
+                  {/* Barge-in button — only shown while AI is actively speaking */}
+                  {isAvatarActive && mic.isRecording && (
+                    <button
+                      onClick={handleBargeIn}
+                      title="Interrupt the AI and start speaking"
+                      style={{
+                        padding: '6px 14px', borderRadius: 8, border: 'none',
+                        cursor: 'pointer', fontWeight: 700, fontSize: 12,
+                        background: 'rgba(251,191,36,0.15)',
+                        color: '#fbbf24',
+                        display: 'flex', alignItems: 'center', gap: 5,
+                        boxShadow: '0 0 10px rgba(251,191,36,0.2)',
+                      }}
+                    >
+                      ✋ Interrupt
+                    </button>
                   )}
 
                   <MicSelector selectedDeviceId={micDeviceId} onSelect={setMicDeviceId} />
 
                   <button
-                    onClick={() => { setTopic(null); handleStop(); setMessages([]); setLatencyReports([]); }}
+                    onClick={() => { setTopic(null); handleStop(); setMessages([]); setLatencyReports([]); setIsMicMuted(false); }}
                     style={{
                       marginLeft: 'auto', padding: '6px 14px', borderRadius: 8,
                       border: '1px solid rgba(255,255,255,0.1)', background: 'transparent',
@@ -392,7 +672,11 @@ function App() {
 
             {/* Right */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflowY: 'auto' }}>
-              <LatencyDashboard reports={latencyReports} />
+              <LatencyDashboard
+                reports={latencyReports}
+                webRTCReadyMs={webRTCReadyMs}
+                reconnectCount={reconnectCount}
+              />
               <VisualAid topic={topic ?? ''} />
               <div className="glass" style={{ padding: 16, fontSize: 12 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#475569', marginBottom: 14 }}>Session</div>
