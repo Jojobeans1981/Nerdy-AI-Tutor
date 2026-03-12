@@ -256,11 +256,9 @@ export class TutorSession {
         }
       });
 
-      // Wait up to 12s for TTS to complete, then abort to avoid dangling WS connections.
-      // Cartesia's free tier rejects a new connection if a prior WS is still open.
-      // With sentence streaming, multiple chunks synthesize sequentially — longer responses
-      // can exceed the old 4s limit. Normal completion fires doneResolve() well before this.
-      const ttsTimeout = new Promise<void>(r => setTimeout(r, 8000));
+      // Wait up to 30s for TTS to complete (paid Cartesia tier — no concurrent connection limit).
+      // Normal completion fires doneResolve() well before this safety cap.
+      const ttsTimeout = new Promise<void>(r => setTimeout(r, 30000));
       await Promise.race([tts.waitForComplete(), ttsTimeout]);
     } catch (err) {
       console.error('[Pipeline] LLM/TTS stream error:', err);
@@ -272,10 +270,7 @@ export class TutorSession {
         this.history.push({ role: 'assistant', content: llmCompleted ? fullResponse : fullResponse + '…' });
       }
     } finally {
-      // Always close the Cartesia WS and WAIT for it to fully close.
-      // Cartesia free tier rejects a new connection if the prior WS is still
-      // in TCP close state — await ensures the next pipeline's tts.connect()
-      // only fires after the socket is truly gone.
+      // Always close the Cartesia WS and wait for it to fully close before the next pipeline runs.
       await tts.abort();
       this.currentAbortController = null;
     }
