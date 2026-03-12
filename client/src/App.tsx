@@ -445,7 +445,9 @@ function App() {
           borderBottom: '1px solid var(--mirra-border)',
           backdropFilter: 'blur(12px)',
         }}>
-          <MirraLogo />
+          <MirraLogo size="md" />
+          <span style={{ color: 'var(--mirra-border)', fontSize: 16, fontWeight: 300, marginLeft: 2 }}>|</span>
+          <span style={{ fontSize: 11, color: 'var(--mirra-text-secondary)', letterSpacing: '0.02em' }}>Ask better. Think deeper.</span>
           {topic && (
             <span style={{
               marginLeft: 8, fontSize: 11, fontWeight: 600,
