@@ -117,7 +117,10 @@ function App() {
       const hungPipeline = isAiRespondingRef.current &&
         aiRespondingStartRef.current > 0 &&
         Date.now() - aiRespondingStartRef.current > 15000;
-      if (micMutedRef.current && (!isAiRespondingRef.current || hungPipeline)) {
+      // Don't fire while audio is still playing (speakingTimeout active) — would open
+      // mic during TTS playback, causing speaker echo to be transcribed as user speech.
+      const audioStillPlaying = speakingTimeoutRef.current !== null;
+      if (micMutedRef.current && !audioStillPlaying && (!isAiRespondingRef.current || hungPipeline)) {
         console.warn(`[Watchdog] Mic stuck muted — ${hungPipeline ? 'pipeline hung >15s' : 'AI not responding'} — force unmuting`);
         if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
         if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }

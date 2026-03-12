@@ -13,6 +13,31 @@ const CONCEPT_META: Record<string, { grade: string; display: string }> = {
   algebra:   { grade: '9th', display: 'Algebra — Solving for x' },
 };
 
+// ── Opening problem pools — picked randomly each new session ──────────────────
+const OPENING_PROBLEMS: Record<string, string[]> = {
+  fractions: [
+    'If you eat 3 slices of a pizza cut into 8 equal pieces, what fraction did you eat?',
+    'A recipe needs 2/3 cup of sugar but you want to make half the recipe. How much sugar do you need?',
+    'You have 3/4 of a chocolate bar. You give 1/4 to a friend. How much do you have left?',
+    'Which is bigger: 2/3 or 3/4? How would you figure that out?',
+    'If a bag has 5 red marbles and 3 blue marbles, what fraction of the marbles are red?',
+  ],
+  mitosis: [
+    'A skin cell needs to replace itself. What is the very first thing it does before it can divide?',
+    'If a cell starts with 46 chromosomes, how many chromosomes should each daughter cell have after mitosis?',
+    'Why do you think a cell needs to copy its DNA before dividing — what would happen if it didn\'t?',
+    'A cell has been growing and copying its DNA. What phase is it about to enter, and what happens there?',
+    'Think about a wound healing on your skin. Which process — mitosis or meiosis — is responsible, and why?',
+  ],
+  algebra: [
+    'If 2x + 3 = 11, what is x? Walk me through how you\'d start solving it.',
+    'A number multiplied by 4 equals 28. Can you write that as an equation and solve it?',
+    'If x - 5 = 7, what would your first step be to find x?',
+    'Three times a number equals 24. What is the number, and how did you find it?',
+    'If 5x = 35, what does x equal? How do you undo the multiplication?',
+  ],
+};
+
 // ── FIX 6: Session context injected per call ──────────────────────────────────
 export interface SessionContext {
   hintLevel: number;          // 0 = question only, 1 = add hint, 2 = partial example
@@ -21,7 +46,7 @@ export interface SessionContext {
   answerVerdict?: 'correct' | 'incorrect' | 'unknown'; // pre-verified by verifyStudentAnswer()
 }
 
-function buildSystemPrompt(concept: string, ctx?: SessionContext): string {
+function buildSystemPrompt(concept: string, ctx?: SessionContext, isFirstTurn = false): string {
   const meta = CONCEPT_META[concept.toLowerCase()] ?? { grade: '7th', display: concept };
 
   const lines = [
@@ -47,6 +72,15 @@ function buildSystemPrompt(concept: string, ctx?: SessionContext): string {
   if (ctx) {
     if (ctx.conceptsMastered.length > 0) lines.push(`- Already mastered: ${ctx.conceptsMastered.join(', ')}`);
     if (ctx.mistakePatterns.length > 0) lines.push(`- Known mistakes: ${ctx.mistakePatterns.join(', ')}`);
+  }
+
+  // On the first turn, inject a randomly chosen opening problem so every session starts fresh
+  if (isFirstTurn) {
+    const pool = OPENING_PROBLEMS[concept.toLowerCase()];
+    if (pool) {
+      const problem = pool[Math.floor(Math.random() * pool.length)];
+      lines.push('', `START WITH THIS EXACT PROBLEM: "${problem}"`);
+    }
   }
 
   return lines.join('\n');
@@ -125,8 +159,9 @@ export async function* streamLLM(
   externalSignal?: AbortSignal,
   sessionContext?: SessionContext,
 ): AsyncGenerator<string> {
+  const isFirstTurn = conversationHistory.length === 0;
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-    { role: 'system', content: buildSystemPrompt(concept, sessionContext) },
+    { role: 'system', content: buildSystemPrompt(concept, sessionContext, isFirstTurn) },
     ...conversationHistory,
     { role: 'user', content: transcript },
   ];
