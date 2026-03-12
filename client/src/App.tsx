@@ -31,6 +31,8 @@ function App() {
   const [textInput, setTextInput] = useState('');
   // True while STT has fired but no AI tokens have arrived yet
   const [isProcessing, setIsProcessing] = useState(false);
+  const [sessionStartTime, setSessionStartTime] = useState<number | null>(null);
+  const [sessionElapsed, setSessionElapsed] = useState(0);
 
   const streamingTextRef = useRef('');
   // True while the AI pipeline is actively streaming tokens.
@@ -119,6 +121,15 @@ function App() {
     }, 5000);
     return () => clearInterval(watchdog);
   }, [mic.isRecording]);
+
+  // Session duration timer — ticks every second while recording
+  useEffect(() => {
+    if (!sessionStartTime) return;
+    const timer = setInterval(() => {
+      setSessionElapsed(Math.floor((Date.now() - sessionStartTime) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [sessionStartTime]);
 
   useEffect(() => {
     ws.onMessage((msg) => {
@@ -333,6 +344,8 @@ function App() {
     // Simli pre-warms before any interaction, so the audio/video elements need an explicit
     // .play() triggered by this click to avoid "NotAllowedError: play() failed" errors.
     avatarRef.current?.unlockAudio();
+    setSessionStartTime(Date.now());
+    setSessionElapsed(0);
     ws.connect();
     setTimeout(async () => {
       let _warnedDropped = false;
@@ -351,6 +364,7 @@ function App() {
   const handleStop = useCallback(() => {
     mic.stopRecording();
     ws.disconnect();
+    setSessionStartTime(null);
   }, [mic, ws]);
 
   const handleBargeIn = useCallback(() => {
@@ -431,23 +445,21 @@ function App() {
               color: '#00d4ff', padding: '3px 10px', borderRadius: 20,
             }}>{topicLabel}</span>
           )}
-          {/* FIX 7: reconnect indicator */}
-          {ws.isReconnecting && (
-            <span style={{
-              marginLeft: 8, fontSize: 11, fontWeight: 600,
-              color: '#f59e0b', display: 'flex', alignItems: 'center', gap: 5,
-            }}>
-              <span style={{ animation: 'pulse 1s infinite' }}>●</span>
-              Reconnecting… ({ws.reconnectAttempts}/5)
-            </span>
-          )}
           {ws.reconnectAttempts >= 5 && !ws.isConnected && (
             <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#ef4444' }}>
-              Connection lost. Please refresh the page.
+              Connection lost — please refresh.
             </span>
           )}
-          <span style={{ fontSize: 11, color: '#475569', marginLeft: 'auto', letterSpacing: '0.5px' }}>
-            by Nerdy / Varsity Tutors
+          <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              fontSize: 11, color: ws.isConnected ? '#22c55e' : ws.isReconnecting ? '#f59e0b' : '#475569',
+            }}>
+              <span>●</span>
+              {ws.isConnected ? 'Connected' : ws.isReconnecting ? 'Reconnecting' : 'Disconnected'}
+            </span>
+            <span style={{ color: '#1e293b' }}>·</span>
+            <span style={{ fontSize: 11, color: '#475569', letterSpacing: '0.5px' }}>by Nerdy / Varsity Tutors</span>
           </span>
         </header>
 
@@ -480,6 +492,24 @@ function App() {
                 Pick a topic and start talking. Your AI tutor guides you with questions — never just giving you the answer.
               </p>
               <TopicSelector selected={topic} onSelect={(t) => { avatarRef.current?.unlockAudio(); setTopic(t); }} />
+
+              {/* How it works */}
+              <div style={{ marginTop: 52, display: 'flex', gap: 32, flexWrap: 'wrap', justifyContent: 'center' }}>
+                {[
+                  { step: '01', label: 'Speak or type', desc: 'Your voice is transcribed in real time' },
+                  { step: '02', label: 'AI thinks', desc: 'Llama 3.1 crafts a Socratic question' },
+                  { step: '03', label: 'Avatar responds', desc: 'Cartesia TTS + Simli lip-sync video' },
+                ].map(({ step, label, desc }) => (
+                  <div key={step} style={{ textAlign: 'center', width: 160 }}>
+                    <div style={{
+                      fontSize: 11, fontWeight: 700, letterSpacing: '2px',
+                      color: '#334155', marginBottom: 6,
+                    }}>{step}</div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: '#94a3b8', marginBottom: 4 }}>{label}</div>
+                    <div style={{ fontSize: 11, color: '#475569', lineHeight: 1.5 }}>{desc}</div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -685,8 +715,21 @@ function App() {
                   <div style={{ color: '#e2e8f0', fontWeight: 600 }}>{topicLabel}</div>
                 </div>
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Method</div>
-                  <div style={{ color: '#94a3b8' }}>Socratic — guides through questions</div>
+                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Status</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ color: mic.isRecording ? '#22c55e' : '#475569', fontSize: 16, lineHeight: 1 }}>●</span>
+                    <span style={{ color: mic.isRecording ? '#22c55e' : '#475569', fontWeight: 600 }}>
+                      {mic.isRecording ? (isProcessing ? 'Processing' : isAvatarActive ? 'AI Speaking' : 'Listening') : 'Idle'}
+                    </span>
+                  </div>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Duration</div>
+                  <div style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 18, fontFamily: 'monospace' }}>
+                    {sessionStartTime
+                      ? `${String(Math.floor(sessionElapsed / 60)).padStart(2, '0')}:${String(sessionElapsed % 60).padStart(2, '0')}`
+                      : '—'}
+                  </div>
                 </div>
                 <div>
                   <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Exchanges</div>
