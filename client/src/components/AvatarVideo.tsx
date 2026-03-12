@@ -177,13 +177,18 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
       audioRechunkBufRef.current = new Uint8Array(0);
     },
     unlockAudio: () => {
-      // The audio element starts muted so Chrome allows the initial autoPlay.
-      // Unmute here (called from a user gesture) so Simli's audio is audible.
+      // Unmute our audio element and play it.
       if (audioRef.current) {
         audioRef.current.muted = false;
         audioRef.current.play().catch(() => {});
       }
       videoRef.current?.play().catch(() => {});
+      // LiveKit creates its own hidden <audio> elements for remote tracks — those
+      // are NOT our audioRef, so we must play() all audio elements in the document.
+      // This unblocks any LiveKit-managed track that failed due to autoplay policy.
+      document.querySelectorAll('audio').forEach(el => {
+        (el as HTMLAudioElement).play().catch(() => {});
+      });
       // Unlock LiveKit's internal AudioContext by resuming a dummy one from this gesture.
       try {
         const ctx = new AudioContext();
