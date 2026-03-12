@@ -14,6 +14,18 @@
   --border:  rgba(255,255,255,0.08);
   --text:    #e2e8f0;
   --muted:   #64748b;
+
+  --mirra-midnight: #0D0F14;
+  --mirra-surface: #13161E;
+  --mirra-border: #1E2330;
+  --mirra-accent: #6C63FF;
+  --mirra-accent-soft: #8B84FF;
+  --mirra-reflect: #3ECFCF;
+  --mirra-text-primary: #F0F2F8;
+  --mirra-text-secondary: #8A90A4;
+  --mirra-correct: #4ADE80;
+  --mirra-caution: #FBBF24;
+  --mirra-error: #F87171;
 }
 
 html, body, #root {

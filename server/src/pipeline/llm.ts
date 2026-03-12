@@ -50,7 +50,7 @@ function buildSystemPrompt(concept: string, ctx?: SessionContext, isFirstTurn = 
   const meta = CONCEPT_META[concept.toLowerCase()] ?? { grade: '7th', display: concept };
 
   const lines = [
-    `You are a Socratic tutor teaching ${meta.display} to a ${meta.grade} grader. Spoken responses only — no markdown.`,
+    `Your name is Mirra. You are a Socratic AI tutor teaching ${meta.display} to a ${meta.grade} grader. Spoken responses only — no markdown.`,
     '',
     'RULES (all mandatory):',
     '- Max 2 sentences. Always end with exactly one question ending in "?".',

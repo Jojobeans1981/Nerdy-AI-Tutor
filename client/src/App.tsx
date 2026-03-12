@@ -7,6 +7,7 @@ import { ChatDisplay } from './components/ChatDisplay';
 import { AvatarVideo, type AvatarVideoHandle } from './components/AvatarVideo';
 import { MicSelector } from './components/MicSelector';
 import { VisualAid } from './components/VisualAid';
+import { MirraLogo } from './components/MirraLogo';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -441,24 +442,19 @@ function App() {
         <header style={{
           padding: '12px 24px', flexShrink: 0,
           display: 'flex', alignItems: 'center', gap: 12,
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
+          borderBottom: '1px solid var(--mirra-border)',
           backdropFilter: 'blur(12px)',
         }}>
-          <div style={{
-            width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-            background: 'linear-gradient(135deg, #00d4ff, #7c3aed)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
-          }}>🎓</div>
-          <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: '-0.3px' }}>Nerdy AI Tutor</span>
+          <MirraLogo />
           {topic && (
             <span style={{
               marginLeft: 8, fontSize: 11, fontWeight: 600,
-              background: 'rgba(0,212,255,0.1)', border: '1px solid rgba(0,212,255,0.25)',
-              color: '#00d4ff', padding: '3px 10px', borderRadius: 20,
+              background: 'rgba(62,207,207,0.1)', border: '1px solid rgba(62,207,207,0.25)',
+              color: 'var(--mirra-reflect)', padding: '3px 10px', borderRadius: 20,
             }}>{topicLabel}</span>
           )}
           {ws.reconnectAttempts >= 5 && !ws.isConnected && (
-            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#ef4444' }}>
+            <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: 'var(--mirra-error)' }}>
               Connection lost — please refresh.
             </span>
           )}
@@ -467,7 +463,7 @@ function App() {
               <>
                 <span style={{
                   display: 'flex', alignItems: 'center', gap: 5,
-                  fontSize: 11, color: ws.isConnected ? '#22c55e' : ws.isReconnecting ? '#f59e0b' : '#ef4444',
+                  fontSize: 11, color: ws.isConnected ? 'var(--mirra-correct)' : ws.isReconnecting ? 'var(--mirra-caution)' : 'var(--mirra-error)',
                 }}>
                   <span>●</span>
                   {ws.isConnected ? 'Connected' : ws.isReconnecting ? 'Reconnecting' : 'Disconnected'}
@@ -475,7 +471,7 @@ function App() {
                 <span style={{ color: '#1e293b' }}>·</span>
               </>
             )}
-            <span style={{ fontSize: 11, color: '#475569', letterSpacing: '0.5px' }}>by Nerdy / Varsity Tutors</span>
+            <span style={{ fontSize: 11, color: 'var(--mirra-text-secondary)', letterSpacing: '0.5px' }}>by Mirra</span>
           </span>
         </header>
 
@@ -494,18 +490,18 @@ function App() {
             }}>
               <div style={{
                 fontSize: 11, fontWeight: 700, letterSpacing: '2.5px',
-                textTransform: 'uppercase', color: '#00d4ff', marginBottom: 16, opacity: 0.9,
-              }}>Socratic AI · Ask, Don't Tell</div>
+                textTransform: 'uppercase', color: 'var(--mirra-reflect)', marginBottom: 16, opacity: 0.9,
+              }}>MIRRA · ASK BETTER. THINK DEEPER.</div>
               <h1 style={{
                 fontSize: 'clamp(28px, 5vw, 48px)', fontWeight: 800,
                 letterSpacing: '-1px', lineHeight: 1.15, marginBottom: 16,
-                background: 'linear-gradient(135deg, #e2e8f0 30%, #7c3aed)',
+                background: 'linear-gradient(135deg, var(--mirra-text-primary) 30%, var(--mirra-accent))',
                 WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
               }}>
-                What would you like<br />to learn today?
+                What would you like<br />to discover today?
               </h1>
-              <p style={{ color: '#64748b', fontSize: 15, marginBottom: 52, maxWidth: 460 }}>
-                Pick a topic and start talking. Your AI tutor guides you with questions — never just giving you the answer.
+              <p style={{ color: 'var(--mirra-text-secondary)', fontSize: 15, marginBottom: 52, maxWidth: 460 }}>
+                Speak your question. Mirra reflects it back — guiding you to the answer through the right questions, never around them.
               </p>
               <TopicSelector selected={topic} onSelect={(t) => { avatarRef.current?.unlockAudio(); setTopic(t); }} />
 
@@ -513,8 +509,8 @@ function App() {
               <div style={{ marginTop: 52, display: 'flex', gap: 32, flexWrap: 'wrap', justifyContent: 'center' }}>
                 {[
                   { step: '01', label: 'Speak or type', desc: 'Your voice is transcribed in real time' },
-                  { step: '02', label: 'AI thinks', desc: 'Llama 3.1 crafts a Socratic question' },
-                  { step: '03', label: 'Avatar responds', desc: 'Cartesia TTS + Simli lip-sync video' },
+                  { step: '02', label: 'Mirra thinks', desc: 'Llama 3.1 crafts a Socratic question' },
+                  { step: '03', label: 'Mirra responds', desc: 'Cartesia TTS + Simli lip-sync video' },
                 ].map(({ step, label, desc }) => (
                   <div key={step} style={{ textAlign: 'center', width: 160 }}>
                     <div style={{
@@ -561,7 +557,7 @@ function App() {
                   background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(239,68,68,0.3)',
                   color: '#fca5a5', fontSize: 12, display: 'flex', alignItems: 'center', gap: 10,
                 }}>
-                  <span>⚠️ No audio received — the tutor's last response may not have played. Check your volume or network.</span>
+                  <span>⚠️ No audio received — Mirra's last response may not have played. Check your volume or network.</span>
                   <button
                     onClick={() => setAudioMissed(false)}
                     style={{ marginLeft: 'auto', background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}
@@ -579,12 +575,12 @@ function App() {
                       style={{
                         position: 'relative', padding: '9px 26px', borderRadius: 50,
                         border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13,
-                        background: 'linear-gradient(135deg, #00d4ff, #7c3aed)',
+                        background: 'linear-gradient(135deg, var(--mirra-reflect), var(--mirra-accent))',
                         color: '#fff', letterSpacing: '0.3px',
-                        boxShadow: '0 0 18px rgba(0,212,255,0.3)',
+                        boxShadow: '0 0 18px rgba(62,207,207,0.3)',
                       }}
                     >
-                      Start Session
+                      Start Thinking
                     </button>
                   ) : (
                     <button
@@ -592,8 +588,8 @@ function App() {
                       style={{
                         position: 'relative', padding: '9px 26px', borderRadius: 50,
                         border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 13,
-                        background: '#ef4444', color: '#fff',
-                        boxShadow: '0 0 18px rgba(239,68,68,0.35)',
+                        background: 'var(--mirra-error)', color: '#fff',
+                        boxShadow: '0 0 18px rgba(248,113,113,0.35)',
                       }}
                     >
                       <span className="pulse-ring" />
@@ -608,7 +604,7 @@ function App() {
                         {Array.from({ length: 7 }).map((_, i) => {
                           const threshold = (i + 1) / 7;
                           const active = mic.audioLevel >= threshold;
-                          const barColor = i < 4 ? '#22c55e' : i < 6 ? '#eab308' : '#ef4444';
+                          const barColor = i < 4 ? 'var(--mirra-correct)' : i < 6 ? 'var(--mirra-caution)' : 'var(--mirra-error)';
                           return (
                             <div
                               key={i}
@@ -624,7 +620,7 @@ function App() {
                       </div>
                       <span style={{
                         fontSize: 11, fontWeight: 600,
-                        color: isProcessing ? '#f59e0b' : mic.audioLevel > 0.05 ? '#22c55e' : '#475569',
+                        color: isProcessing ? 'var(--mirra-caution)' : mic.audioLevel > 0.05 ? 'var(--mirra-correct)' : 'var(--mirra-text-secondary)',
                         transition: 'color 0.2s',
                       }}>
                         {isProcessing ? 'Processing…' : mic.audioLevel > 0.05 ? 'Listening...' : 'Speak now'}
@@ -640,8 +636,8 @@ function App() {
                       style={{
                         padding: '6px 12px', borderRadius: 8, border: 'none',
                         cursor: 'pointer', fontWeight: 600, fontSize: 12,
-                        background: isMicMuted ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.06)',
-                        color: isMicMuted ? '#ef4444' : '#94a3b8',
+                        background: isMicMuted ? 'rgba(248,113,113,0.2)' : 'rgba(255,255,255,0.06)',
+                        color: isMicMuted ? 'var(--mirra-error)' : '#94a3b8',
                         display: 'flex', alignItems: 'center', gap: 5,
                       }}
                     >
@@ -704,8 +700,8 @@ function App() {
                       style={{
                         padding: '8px 18px', borderRadius: 8, border: 'none',
                         cursor: textInput.trim() ? 'pointer' : 'default',
-                        background: textInput.trim() ? 'rgba(0,212,255,0.2)' : 'rgba(255,255,255,0.05)',
-                        color: textInput.trim() ? '#00d4ff' : '#334155',
+                        background: textInput.trim() ? 'rgba(62,207,207,0.2)' : 'rgba(255,255,255,0.05)',
+                        color: textInput.trim() ? 'var(--mirra-reflect)' : '#334155',
                         fontWeight: 600, fontSize: 13,
                       }}
                     >
@@ -725,31 +721,31 @@ function App() {
               />
               <VisualAid topic={topic ?? ''} />
               <div className="glass" style={{ padding: 16, fontSize: 12 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#475569', marginBottom: 14 }}>Session</div>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: 'var(--mirra-text-secondary)', marginBottom: 14 }}>Session</div>
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Topic</div>
-                  <div style={{ color: '#e2e8f0', fontWeight: 600 }}>{topicLabel}</div>
+                  <div style={{ color: 'var(--mirra-text-secondary)', fontSize: 11, marginBottom: 3 }}>Topic</div>
+                  <div style={{ color: 'var(--mirra-text-primary)', fontWeight: 600 }}>{topicLabel}</div>
                 </div>
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Status</div>
+                  <div style={{ color: 'var(--mirra-text-secondary)', fontSize: 11, marginBottom: 3 }}>Status</div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ color: mic.isRecording ? '#22c55e' : '#475569', fontSize: 16, lineHeight: 1 }}>●</span>
-                    <span style={{ color: mic.isRecording ? '#22c55e' : '#475569', fontWeight: 600 }}>
+                    <span style={{ color: mic.isRecording ? 'var(--mirra-correct)' : 'var(--mirra-text-secondary)', fontSize: 16, lineHeight: 1 }}>●</span>
+                    <span style={{ color: mic.isRecording ? 'var(--mirra-correct)' : 'var(--mirra-text-secondary)', fontWeight: 600 }}>
                       {mic.isRecording ? (isProcessing ? 'Processing' : isAvatarActive ? 'AI Speaking' : 'Listening') : 'Idle'}
                     </span>
                   </div>
                 </div>
                 <div style={{ marginBottom: 12 }}>
-                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Duration</div>
-                  <div style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 18, fontFamily: 'monospace' }}>
+                  <div style={{ color: 'var(--mirra-text-secondary)', fontSize: 11, marginBottom: 3 }}>Duration</div>
+                  <div style={{ color: 'var(--mirra-text-primary)', fontWeight: 700, fontSize: 18, fontFamily: 'monospace' }}>
                     {sessionStartTime
                       ? `${String(Math.floor(sessionElapsed / 60)).padStart(2, '0')}:${String(sessionElapsed % 60).padStart(2, '0')}`
                       : '—'}
                   </div>
                 </div>
                 <div>
-                  <div style={{ color: '#475569', fontSize: 11, marginBottom: 3 }}>Exchanges</div>
-                  <div style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 20 }}>
+                  <div style={{ color: 'var(--mirra-text-secondary)', fontSize: 11, marginBottom: 3 }}>Exchanges</div>
+                  <div style={{ color: 'var(--mirra-text-primary)', fontWeight: 700, fontSize: 20 }}>
                     {messages.filter(m => m.role === 'user').length}
                   </div>
                 </div>

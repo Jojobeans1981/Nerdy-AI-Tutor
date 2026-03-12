@@ -16,7 +16,7 @@ function avg(nums: number[]): string {
 
 function badge(ms: number, limit: number): string {
   if (ms < 0) return 'gray';
-  return ms <= limit ? '#22c55e' : '#ef4444';
+  return ms <= limit ? 'var(--mirra-correct)' : 'var(--mirra-error)';
 }
 
 /** FIX 8: 0-100 quality score based on avg latency and reconnect count */
@@ -31,9 +31,9 @@ function calcQualityScore(reports: LatencyReport[], reconnectCount: number): num
 }
 
 function qualityColor(score: number): string {
-  if (score >= 80) return '#22c55e';
-  if (score >= 50) return '#f59e0b';
-  return '#ef4444';
+  if (score >= 80) return 'var(--mirra-correct)';
+  if (score >= 50) return 'var(--mirra-caution)';
+  return 'var(--mirra-error)';
 }
 
 export function LatencyDashboard({ reports, webRTCReadyMs, reconnectCount }: Props) {
@@ -43,15 +43,15 @@ export function LatencyDashboard({ reports, webRTCReadyMs, reconnectCount }: Pro
 
   return (
     <div className="glass" style={{ padding: 16, color: '#e2e8f0', fontSize: 12 }}>
-      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: '#475569', marginBottom: 14 }}>
-        Pipeline Latency
+      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '1.5px', textTransform: 'uppercase', color: 'var(--mirra-text-secondary)', marginBottom: 14 }}>
+        Mirra Pipeline
       </div>
 
       {/* FIX 8: WebRTC ready time + quality score always shown */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <div style={{ fontFamily: 'monospace', fontSize: 11 }}>
           <span style={{ color: '#64748b' }}>WebRTC ready </span>
-          <span style={{ color: webRTCReadyMs !== null ? '#00d4ff' : '#334155' }}>
+          <span style={{ color: webRTCReadyMs !== null ? 'var(--mirra-reflect)' : '#334155' }}>
             {webRTCReadyMs !== null ? `${webRTCReadyMs}ms` : '--'}
           </span>
         </div>
@@ -78,7 +78,7 @@ export function LatencyDashboard({ reports, webRTCReadyMs, reconnectCount }: Pro
           <div style={{ marginTop: 10, fontSize: 10, color: '#334155' }}>
             {reports.length} interaction{reports.length !== 1 ? 's' : ''}
             {reconnectCount > 0 && (
-              <span style={{ color: '#f59e0b', marginLeft: 8 }}>
+              <span style={{ color: 'var(--mirra-caution)', marginLeft: 8 }}>
                 · {reconnectCount} reconnect{reconnectCount !== 1 ? 's' : ''}
               </span>
             )}

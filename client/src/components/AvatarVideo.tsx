@@ -105,7 +105,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
   const [webRTCReady, setWebRTCReady] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [failedStep, setFailedStep] = useState<FailedStep>(null);
-  const [connectStep, setConnectStep] = useState<string>('Initializing…');
+  const [connectStep, setConnectStep] = useState<string>('Mirra is warming up...');
   // FIX 1: track mount time so we can report how long the pre-warm took
   const mountTimeRef = useRef(Date.now());
   // Throttle drift POSTs to once per second
@@ -219,7 +219,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
         return;
       }
       try {
-        setConnectStep('Getting session token…');
+        setConnectStep('Mirra is warming up...');
         console.log('[Simli] Fetching session token + ICE servers...');
         const authPromise = prefetchSimliAuth();
         if (!authPromise) throw new Error('Simli API key or face ID missing');
@@ -235,7 +235,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
           throw authErr;
         }
         console.log('[Simli] Auth OK — session_token length:', session_token?.length ?? 0);
-        setConnectStep('Starting WebRTC…');
+        setConnectStep('Almost there...');
         prefetchedAuth = null;
 
         if (cancelled) return;
@@ -400,7 +400,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
         borderRadius: 16,
         overflow: 'hidden',
         border: '1px solid #222',
-        background: '#0a0a1a',
+        background: 'var(--mirra-midnight)',
         height: 420,
         flexShrink: 0,
       }}
@@ -411,15 +411,15 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
           position: 'absolute', inset: 0,
           display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center', gap: 16,
-          background: 'radial-gradient(ellipse at center, #0d1b2a 0%, #0a0a1a 100%)',
+          background: 'radial-gradient(ellipse at center, #0d1b2a 0%, var(--mirra-midnight) 100%)',
         }}>
           <div style={{
             width: 110, height: 110, borderRadius: '50%',
             background: 'linear-gradient(135deg, #1e3a5f 0%, #0f2236 100%)',
-            border: '2px solid rgba(0,212,255,0.15)',
+            border: '2px solid rgba(62,207,207,0.15)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 52,
-          }}>🎓</div>
+            fontSize: 52, color: 'var(--mirra-reflect)', fontWeight: 700, fontFamily: 'Inter, sans-serif',
+          }}>M</div>
           <span style={{
             fontSize: 12, color: '#334155', fontFamily: 'monospace', letterSpacing: '0.5px',
           }}>
@@ -465,7 +465,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
             color: '#475569', fontSize: 11, fontFamily: 'monospace',
             background: 'rgba(0,0,0,0.5)', padding: '3px 10px', borderRadius: 20,
           }}>
-            Connecting...
+            Mirra is warming up...
           </span>
         </div>
       )}
@@ -480,7 +480,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
-            background: 'rgba(10,10,26,0.9)',
+            background: 'rgba(13,15,20,0.9)',
             gap: 10,
             padding: '0 20px',
           }}
@@ -527,7 +527,7 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
               style={{
                 marginTop: 4, padding: '7px 20px', borderRadius: 8, border: 'none',
                 cursor: 'pointer', fontWeight: 600, fontSize: 12,
-                background: 'rgba(0,212,255,0.15)', color: '#00d4ff',
+                background: 'rgba(62,207,207,0.15)', color: 'var(--mirra-reflect)',
               }}
             >
               Retry Connection
@@ -544,14 +544,14 @@ export const AvatarVideo = forwardRef<AvatarVideoHandle, Props>(({ isActive, onW
             bottom: 8,
             right: 10,
             fontSize: 10,
-            color: isActive ? '#00d4ff' : '#555',
+            color: isActive ? 'var(--mirra-reflect)' : '#555',
             fontFamily: 'monospace',
             display: 'flex',
             alignItems: 'center',
             gap: 4,
           }}
         >
-          <span style={{ color: isActive ? '#22c55e' : '#555' }}>●</span>
+          <span style={{ color: isActive ? 'var(--mirra-correct)' : '#555' }}>●</span>
           {isActive ? 'Speaking' : 'Listening'}
         </div>
       )}

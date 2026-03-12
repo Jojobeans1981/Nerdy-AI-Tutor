@@ -30,7 +30,7 @@ export function ChatDisplay({ messages, interimTranscript, streamingText }: Prop
         }}>
           <div style={{ fontSize: 32, opacity: 0.4 }}>💬</div>
           <div style={{ fontSize: 13 }}>Conversation will appear here</div>
-          <div style={{ fontSize: 11, opacity: 0.6 }}>Press Start Session and begin speaking</div>
+          <div style={{ fontSize: 11, opacity: 0.6 }}>Mirra is listening...</div>
         </div>
       )}
 
@@ -43,8 +43,8 @@ export function ChatDisplay({ messages, interimTranscript, streamingText }: Prop
           <div style={{
             width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
             background: msg.role === 'user'
-              ? 'rgba(0,212,255,0.2)'
-              : 'linear-gradient(135deg, #7c3aed, #ec4899)',
+              ? 'rgba(62,207,207,0.2)'
+              : 'linear-gradient(135deg, var(--mirra-accent), var(--mirra-accent-soft))',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
           }}>
             {msg.role === 'user' ? '🎤' : '🤖'}
@@ -52,9 +52,9 @@ export function ChatDisplay({ messages, interimTranscript, streamingText }: Prop
           <div style={{
             maxWidth: '78%', padding: '10px 14px',
             borderRadius: msg.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-            background: msg.role === 'user' ? 'rgba(0,212,255,0.08)' : 'rgba(124,58,237,0.1)',
-            border: msg.role === 'user' ? '1px solid rgba(0,212,255,0.18)' : '1px solid rgba(124,58,237,0.22)',
-            color: '#e2e8f0', fontSize: 14, lineHeight: 1.55,
+            background: msg.role === 'user' ? 'rgba(62,207,207,0.08)' : 'rgba(108,99,255,0.1)',
+            border: msg.role === 'user' ? '1px solid rgba(62,207,207,0.18)' : '1px solid rgba(108,99,255,0.22)',
+            color: 'var(--mirra-text-primary)', fontSize: 14, lineHeight: 1.55,
           }}>
             {msg.text}
           </div>
@@ -65,15 +65,15 @@ export function ChatDisplay({ messages, interimTranscript, streamingText }: Prop
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
           <div style={{
             width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
-            background: 'linear-gradient(135deg, #7c3aed, #ec4899)',
+            background: 'linear-gradient(135deg, var(--mirra-accent), var(--mirra-accent-soft))',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
           }}>🤖</div>
           <div style={{
             maxWidth: '78%', padding: '10px 14px',
             borderRadius: '16px 16px 16px 4px',
-            background: 'rgba(124,58,237,0.1)',
-            border: '1px solid rgba(124,58,237,0.22)',
-            color: '#e2e8f0', fontSize: 14, lineHeight: 1.55,
+            background: 'rgba(108,99,255,0.1)',
+            border: '1px solid rgba(108,99,255,0.22)',
+            color: 'var(--mirra-text-primary)', fontSize: 14, lineHeight: 1.55,
           }}>
             {streamingText}
             <span style={{ animation: 'blink 1s step-end infinite', opacity: 0.6, marginLeft: 1 }}>▌</span>
@@ -85,14 +85,14 @@ export function ChatDisplay({ messages, interimTranscript, streamingText }: Prop
         <div style={{ display: 'flex', flexDirection: 'row-reverse', alignItems: 'flex-end', gap: 8 }}>
           <div style={{
             width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
-            background: 'rgba(0,212,255,0.12)',
+            background: 'rgba(62,207,207,0.12)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
           }}>🎤</div>
           <div style={{
             maxWidth: '78%', padding: '8px 14px',
             borderRadius: '16px 16px 4px 16px',
-            border: '1px dashed rgba(0,212,255,0.18)',
-            color: '#64748b', fontSize: 13, fontStyle: 'italic',
+            border: '1px dashed rgba(62,207,207,0.18)',
+            color: 'var(--mirra-text-secondary)', fontSize: 13, fontStyle: 'italic',
           }}>
             {interimTranscript}…
           </div>

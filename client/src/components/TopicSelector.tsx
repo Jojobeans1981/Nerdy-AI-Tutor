@@ -4,9 +4,9 @@ const TOPICS = [
     label: 'Fractions',
     grade: '6th Grade',
     emoji: '🔢',
-    accent: '#00d4ff',
-    glow: 'rgba(0,212,255,0.15)',
-    desc: 'Adding, subtracting & comparing fractions',
+    accent: 'var(--mirra-reflect)',
+    glow: 'rgba(62,207,207,0.15)',
+    desc: 'What does it mean to divide something equally?',
   },
   {
     id: 'mitosis',
@@ -14,9 +14,9 @@ const TOPICS = [
     subtitle: 'Mitosis',
     grade: '8th Grade',
     emoji: '🧬',
-    accent: '#a855f7',
-    glow: 'rgba(168,85,247,0.15)',
-    desc: 'Phases of cell division & DNA replication',
+    accent: 'var(--mirra-accent)',
+    glow: 'rgba(108,99,255,0.15)',
+    desc: 'How does one cell become two — and why does it matter?',
   },
   {
     id: 'algebra',
@@ -24,9 +24,9 @@ const TOPICS = [
     subtitle: 'Solving for x',
     grade: '9th Grade',
     emoji: '📐',
-    accent: '#ec4899',
-    glow: 'rgba(236,72,153,0.15)',
-    desc: 'Linear equations & variable isolation',
+    accent: 'var(--mirra-accent-soft)',
+    glow: 'rgba(139,132,255,0.15)',
+    desc: 'What stays balanced when both sides change?',
   },
 ] as const;
 
@@ -51,7 +51,7 @@ export function TopicSelector({ selected, onSelect }: Props) {
               borderRadius: 16,
               border: `1px solid ${isSelected ? t.accent : 'rgba(255,255,255,0.08)'}`,
               background: isSelected ? t.glow : 'rgba(255,255,255,0.03)',
-              color: '#e2e8f0',
+              color: 'var(--mirra-text-primary)',
               cursor: 'pointer',
               textAlign: 'left',
               transition: 'all 0.2s',
@@ -60,11 +60,11 @@ export function TopicSelector({ selected, onSelect }: Props) {
             }}
           >
             <div style={{ fontSize: 32, marginBottom: 12 }}>{t.emoji}</div>
-            <div style={{ fontWeight: 700, fontSize: 15, color: isSelected ? t.accent : '#e2e8f0', marginBottom: 2 }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: isSelected ? t.accent : 'var(--mirra-text-primary)', marginBottom: 2 }}>
               {t.label}
             </div>
             {'subtitle' in t && (
-              <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>{t.subtitle}</div>
+              <div style={{ fontSize: 12, color: 'var(--mirra-text-secondary)', marginBottom: 6 }}>{t.subtitle}</div>
             )}
             <div style={{
               display: 'inline-block', fontSize: 10, fontWeight: 600,
@@ -72,7 +72,7 @@ export function TopicSelector({ selected, onSelect }: Props) {
               color: t.accent, background: `${t.accent}18`,
               padding: '2px 8px', borderRadius: 20, marginBottom: 10,
             }}>{t.grade}</div>
-            <div style={{ fontSize: 12, color: '#475569', lineHeight: 1.4 }}>{t.desc}</div>
+            <div style={{ fontSize: 12, color: 'var(--mirra-text-secondary)', lineHeight: 1.4 }}>{t.desc}</div>
           </button>
         );
       })}

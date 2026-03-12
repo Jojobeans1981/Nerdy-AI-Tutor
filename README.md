@@ -1,6 +1,12 @@
-# Nerdy AI Tutor
+# Mirra
 
-A real-time AI video avatar tutor that uses the Socratic method to teach students through conversation — not lectures. The student speaks, the AI responds with guiding questions through a lip-synced video avatar, achieving sub-500ms end-to-end latency.
+> Ask better. Think deeper.
+
+Mirra is a real-time Socratic AI tutor — a lip-synced video avatar that guides
+students to answers through questions, never around them. Speak naturally; Mirra
+reflects your thinking back at you until the answer becomes obvious.
+
+Built for the Nerdy / Varsity Tutors platform.
 
 ## Pipeline
 
