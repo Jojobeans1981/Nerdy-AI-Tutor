@@ -42,7 +42,7 @@ export class DeepgramSTT {
       language: 'en-US',
       smart_format: true,
       interim_results: true,
-      endpointing: 250,       // ms of silence → speech_final (250ms for faster response)
+      endpointing: 300,       // ms of silence → speech_final (300ms — 250ms caused false triggers on mid-sentence pauses)
       utterance_end_ms: 1500, // fallback finalizer if speech_final never fires
       vad_events: true,
       encoding: 'linear16',
@@ -73,7 +73,9 @@ export class DeepgramSTT {
       const isFinal: boolean = data.is_final ?? false;
       const speechFinal: boolean = data.speech_final ?? false;
 
-      if (speechFinal && (confidence < 0.65 || wordCount < 2)) {
+      // Only drop very low-confidence results (likely background noise/breathing).
+      // wordCount filter removed — single-word answers like "six", "yes", "x" are valid.
+      if (speechFinal && confidence < 0.55) {
         console.log(`[STT] Noise filter dropped: confidence=${confidence.toFixed(2)} words=${wordCount} text="${text}"`);
         this.pendingFinalText = '';
         this.audioStartMs = 0;
