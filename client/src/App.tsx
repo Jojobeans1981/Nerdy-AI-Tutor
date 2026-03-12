@@ -39,6 +39,8 @@ function App() {
   // Prevents a spurious speech_final (background noise, echo) from wiping
   // streamingTextRef mid-response and causing the chat bubble to vanish.
   const isAiRespondingRef = useRef(false);
+  // Timestamp when isAiRespondingRef was last set true — used by watchdog to detect hung pipelines
+  const aiRespondingStartRef = useRef(0);
   const avatarRef = useRef<AvatarVideoHandle>(null);
   const speakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Stable ref to the speaking-done callback so both onAudio and response_end
@@ -95,7 +97,7 @@ function App() {
       console.warn('[Mic] WS reconnected mid-session — resetting pipeline state');
       if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
       if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
-      isAiRespondingRef.current = false;
+      isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
       responseEndedRef.current = false;
       streamingTextRef.current = '';
       setStreamingText('');
@@ -112,10 +114,16 @@ function App() {
   useEffect(() => {
     if (!mic.isRecording) return;
     const watchdog = setInterval(() => {
-      if (micMutedRef.current && !isAiRespondingRef.current) {
-        console.warn('[Watchdog] Mic stuck muted — AI not responding — force unmuting');
+      const hungPipeline = isAiRespondingRef.current &&
+        aiRespondingStartRef.current > 0 &&
+        Date.now() - aiRespondingStartRef.current > 15000;
+      if (micMutedRef.current && (!isAiRespondingRef.current || hungPipeline)) {
+        console.warn(`[Watchdog] Mic stuck muted — ${hungPipeline ? 'pipeline hung >15s' : 'AI not responding'} — force unmuting`);
         if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
         if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+        isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
+        setIsProcessing(false);
+        setIsAvatarActive(false);
         micMutedRef.current = false;
       }
     }, 5000);
@@ -161,6 +169,7 @@ function App() {
         case 'token': {
           const isFirstToken = !isAiRespondingRef.current;
           isAiRespondingRef.current = true;
+          if (aiRespondingStartRef.current === 0) aiRespondingStartRef.current = Date.now();
           setIsProcessing(false); // first token arrived — clear spinner
           responseEndedRef.current = false; // new response starting
           audioReceivedRef.current = false; // reset audio-received flag for this response
@@ -185,7 +194,7 @@ function App() {
         }
 
         case 'response_end': {
-          isAiRespondingRef.current = false;
+          isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
           setIsProcessing(false); // clear in case LLM errored before sending any token
           // Capture NOW — React updater functions run async, so reading the ref
           // inside setMessages would see the already-cleared value ("").
@@ -329,7 +338,7 @@ function App() {
   const handleStart = useCallback(async () => {
     // Full reset of all pipeline state — covers fresh starts and topic-change-then-restart.
     // Prevents stale refs from a previous session bleeding into the new one.
-    isAiRespondingRef.current = false;
+    isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
     responseEndedRef.current = false;
     audioReceivedRef.current = false;
     streamingTextRef.current = '';
@@ -369,7 +378,7 @@ function App() {
 
   const handleBargeIn = useCallback(() => {
     // Immediately stop the AI response on client
-    isAiRespondingRef.current = false;
+    isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
     setIsProcessing(false);
     responseEndedRef.current = true;
     streamingTextRef.current = '';
