@@ -265,10 +265,8 @@ Rules:
 - Never add a concept if student was wrong; never add a mistake if student was correct
 - Keep each array to max 5 items, drop oldest if over limit`;
 
-  const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
   try {
-    const completion = await client.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       model: 'llama-3.1-8b-instant',
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 200,

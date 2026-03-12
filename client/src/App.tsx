@@ -283,11 +283,15 @@ function App() {
       setIsAvatarActive(false);
       avatarRef.current?.flushAudio();
       avatarRef.current?.resetForInteraction();
-      // Unmute mic — TTS is done (1.5s of silence after last audio chunk)
+      // Delay mic open by 600ms — Simli WebRTC buffers ~200-500ms of audio after the
+      // last PCM chunk arrives. Opening the mic immediately causes TTS echo to be
+      // transcribed as user speech, triggering a spurious pipeline before the user speaks.
       if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
-      micUnmuteTimerRef.current = null;
-      micMutedRef.current = false;
-      console.log('[Mic] Unmuted — speaking done (TTS finished)');
+      micUnmuteTimerRef.current = setTimeout(() => {
+        micUnmuteTimerRef.current = null;
+        micMutedRef.current = false;
+        console.log('[Mic] Unmuted — speaking done (TTS finished + Simli drain)');
+      }, 600);
     };
   });
 

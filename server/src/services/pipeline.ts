@@ -76,6 +76,9 @@ export class TutorSession {
    */
   prefetchVerify(transcript: string): void {
     if (this.isBusy) return; // don't prefetch if a pipeline is already running
+    // Debounce: if is_final fires multiple times with the same text (Deepgram can
+    // emit several is_final events before speech_final), skip redundant Groq calls.
+    if (this.prefetchedTranscript === transcript && this.prefetchedVerify) return;
     this.prefetchedTranscript = transcript;
     this.prefetchedVerify = verifyStudentAnswer(transcript, this.concept, this.history);
     console.log(`[Verify] Prefetch started for: "${transcript.slice(0, 50)}"`);
