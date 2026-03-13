@@ -281,10 +281,14 @@ export class TutorSession {
         }
       });
 
-      // Wait up to 30s for TTS to complete (paid Cartesia tier — no concurrent connection limit).
-      // Normal completion fires doneResolve() well before this safety cap.
-      const ttsTimeout = new Promise<void>(r => setTimeout(r, 30000));
+      // Wait up to 8s for Cartesia to finish streaming audio + send done:true.
+      // Audio chunks are forwarded to the client as they arrive, but abort() closes
+      // the WS and kills any remaining synthesis — so we must wait long enough for
+      // the full response to be synthesized. 8s covers longer Socratic responses.
+      let ttsTimedOut = false;
+      const ttsTimeout = new Promise<void>(r => setTimeout(() => { ttsTimedOut = true; r(); }, 8000));
       await Promise.race([tts.waitForComplete(), ttsTimeout]);
+      if (ttsTimedOut) console.warn(`[Pipeline] TTS completion timeout (8s) — aborting Cartesia WS`);
     } catch (err) {
       console.error('[Pipeline] LLM/TTS stream error:', err);
       // Notify the client so the UI doesn't stay frozen waiting for response_end

@@ -42,8 +42,8 @@ export class DeepgramSTT {
       language: 'en-US',
       smart_format: true,
       interim_results: true,
-      endpointing: 300,       // ms of silence → speech_final (300ms — 250ms caused false triggers on mid-sentence pauses)
-      utterance_end_ms: 1500, // fallback finalizer if speech_final never fires
+      endpointing: 250,       // ms of silence → speech_final (reduced from 300ms; confidence filter catches false triggers)
+      utterance_end_ms: 1000, // fallback finalizer if speech_final never fires (reduced from 1500)
       vad_events: true,
       encoding: 'linear16',
       sample_rate: 16000,

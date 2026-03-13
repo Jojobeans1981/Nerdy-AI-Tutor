@@ -151,19 +151,21 @@ export class CartesiaTTS {
   /**
    * Accumulate LLM tokens and flush complete sentences immediately.
    *
-   * Sentences ending in "." or "!" are sent to Cartesia with continue=true as soon
-   * as they arrive, so Cartesia starts synthesizing sentence 1 while the LLM is
-   * still generating sentence 2. This cuts first-audio latency by ~300-500ms.
+   * Sentences ending in "." or "!" are sent to Cartesia with continue=true as
+   * soon as they arrive, so Cartesia starts synthesizing sentence 1 while the
+   * LLM is still generating sentence 2. This cuts first-audio latency by ~300-500ms.
    *
-   * "?" is intentionally excluded — every response ends with one, so we leave the
-   * final sentence in the buffer for endStream() to send with continue=false.
-   * This avoids sending a useless empty/space chunk as the last request.
+   * "?" is intentionally excluded — Cartesia requires a final chunk with
+   * continue=false to complete the context. Every Socratic response ends with
+   * "?", so leaving it in the buffer ensures endStream() sends it correctly.
+   * Flushing "?" with continue=true would leave no text for the final chunk,
+   * causing Cartesia to never send done:true and hanging the pipeline.
    */
   sendToken(token: string): void {
     this.textBuffer += token;
     const buf = this.textBuffer;
-    // Flush on sentence-ending "." or "!" once we have at least 10 chars of content
-    if (buf.length >= 10 && /[.!][ \t]*$/.test(buf)) {
+    // Flush on sentence-ending "." or "!" once we have at least 5 chars of content
+    if (buf.length >= 5 && /[.!][ \t]*$/.test(buf)) {
       const text = buf.trimEnd();
       this.textBuffer = '';
       console.log(`[TTS] Sentence flush (${text.length} chars): "${text.slice(0, 60)}"`);
@@ -224,7 +226,7 @@ export class CartesiaTTS {
     // Already closed (Cartesia closed their side right after done:true)
     if (this.wsClosed) return Promise.resolve();
     return new Promise<void>(resolve => {
-      const timeout = setTimeout(resolve, 1000); // safety fallback
+      const timeout = setTimeout(resolve, 500); // safety fallback (reduced from 1s)
       const done = () => { clearTimeout(timeout); resolve(); };
       ws.once('close', done);
       ws.once('error', done); // handle close-time errors without crashing Node
@@ -250,9 +252,9 @@ export class CartesiaTTS {
       const ms = Date.now() - this.connectMs;
       console.log(`[TTS] First audio: ${ms}ms after connect()`);
       this.cb.onFirstByte(ms);
-      // Brief silence offset so Simli's video generation catches up before first word
-      console.log('[TTS] Prepending silence buffer');
-      const silence = generateSilenceBuffer(80);
+      // Brief 40ms silence offset so Simli's video generation catches up before first word
+      console.log('[TTS] Prepending 40ms silence buffer');
+      const silence = generateSilenceBuffer(40);
       this.cb.onAudioChunk(Buffer.concat([silence, pcm]));
       return;
     }

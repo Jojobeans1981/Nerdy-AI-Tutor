@@ -4,7 +4,7 @@ import { useMicrophone } from './hooks/useMicrophone';
 import { LatencyDashboard } from './components/LatencyDashboard';
 import { TopicSelector } from './components/TopicSelector';
 import { ChatDisplay } from './components/ChatDisplay';
-import { AvatarVideo, type AvatarVideoHandle } from './components/AvatarVideo';
+import { ClientAvatar, type ClientAvatarHandle } from './components/ClientAvatar';
 import { MicSelector } from './components/MicSelector';
 import { VisualAid } from './components/VisualAid';
 import { MirraLogo } from './components/MirraLogo';
@@ -42,7 +42,7 @@ function App() {
   const isAiRespondingRef = useRef(false);
   // Timestamp when isAiRespondingRef was last set true — used by watchdog to detect hung pipelines
   const aiRespondingStartRef = useRef(0);
-  const avatarRef = useRef<AvatarVideoHandle>(null);
+  const avatarRef = useRef<ClientAvatarHandle>(null);
   const speakingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Stable ref to the speaking-done callback so both onAudio and response_end
   // can schedule it without duplicating code. Set once after component mounts.
@@ -63,9 +63,8 @@ function App() {
   // FIX 8: WebRTC pre-warm timing and reconnect tracking for LatencyDashboard
   const [webRTCReadyMs, setWebRTCReadyMs] = useState<number | null>(null);
   const [reconnectCount, setReconnectCount] = useState(0);
-  // Web Audio API fallback: plays raw PCM when Simli WebRTC isn't connected yet
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const simliReadyRef = useRef(false);
+  // Client avatar is always ready — no WebRTC warmup needed
+  const avatarReadyRef = useRef(false);
   // True once any audio frame arrives for the current response
   const audioReceivedRef = useRef(false);
   // Non-null when the last response had no audio (shows warning banner)
@@ -118,10 +117,13 @@ function App() {
       const hungPipeline = isAiRespondingRef.current &&
         aiRespondingStartRef.current > 0 &&
         Date.now() - aiRespondingStartRef.current > 15000;
-      // Don't fire while audio is still playing (speakingTimeout active) — would open
-      // mic during TTS playback, causing speaker echo to be transcribed as user speech.
+      // Don't fire while audio is still playing (speakingTimeout active) or while
+      // a dynamic unmute timer is pending (waiting for Web Audio playback to finish).
+      // Firing during either would open the mic during TTS playback, causing speaker
+      // echo to be transcribed as user speech and breaking the next interaction.
       const audioStillPlaying = speakingTimeoutRef.current !== null;
-      if (micMutedRef.current && !audioStillPlaying && (!isAiRespondingRef.current || hungPipeline)) {
+      const unmuteScheduled = micUnmuteTimerRef.current !== null;
+      if (micMutedRef.current && !audioStillPlaying && !unmuteScheduled && (!isAiRespondingRef.current || hungPipeline)) {
         console.warn(`[Watchdog] Mic stuck muted — ${hungPipeline ? 'pipeline hung >15s' : 'AI not responding'} — force unmuting`);
         if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
         if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
@@ -248,7 +250,7 @@ function App() {
           // it to 3s so the "Speaking" state clears promptly.
           if (speakingTimeoutRef.current) {
             clearTimeout(speakingTimeoutRef.current);
-            speakingTimeoutRef.current = setTimeout(() => speakingDoneRef.current?.(), 1500);
+            speakingTimeoutRef.current = setTimeout(() => speakingDoneRef.current?.(), 800);
           }
           // No-audio case: if TTS fails entirely and no audio arrives, the 8s safety
           // timer set on first token handles unmute. The fast-forward above handles
@@ -281,17 +283,24 @@ function App() {
       // doesn't fire speakingDone prematurely on the NEXT exchange.
       speakingTimeoutRef.current = null;
       setIsAvatarActive(false);
-      avatarRef.current?.flushAudio();
-      avatarRef.current?.resetForInteraction();
-      // Delay mic open by 600ms — Simli WebRTC buffers ~200-500ms of audio after the
-      // last PCM chunk arrives. Opening the mic immediately causes TTS echo to be
-      // transcribed as user speech, triggering a spurious pipeline before the user speaks.
+      // Only reset stats — do NOT call resetForInteraction() here.
+      // Client-side audio may still be playing (scheduled via Web Audio API).
+      // resetForInteraction() stops all active sources, cutting audio mid-sentence.
+      // Barge-in (handleBargeIn) calls resetForInteraction() explicitly to force-stop.
+      avatarRef.current?.resetStats();
+      // Dynamic mic unmute: wait for scheduled Web Audio playback to finish.
+      // Web Audio API schedules chunks ahead via nextPlayTime — audio may still be
+      // playing 1-2s after the last chunk arrives. Opening the mic too early causes
+      // Deepgram to transcribe the AI's own speech as user input, breaking the session.
+      const remainingMs = avatarRef.current?.getRemainingPlayMs() ?? 0;
+      const unmuteDelay = Math.max(100, remainingMs + 200); // 200ms safety margin
+      console.log(`[Mic] Scheduling unmute in ${unmuteDelay}ms (${remainingMs}ms audio remaining)`);
       if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
       micUnmuteTimerRef.current = setTimeout(() => {
         micUnmuteTimerRef.current = null;
         micMutedRef.current = false;
-        console.log('[Mic] Unmuted — speaking done (TTS finished + Simli drain)');
-      }, 600);
+        console.log('[Mic] Unmuted — speaking done');
+      }, unmuteDelay);
     };
   });
 
@@ -301,44 +310,20 @@ function App() {
       setIsAvatarActive(true);
       audioReceivedRef.current = true;
       // Reset the speaking timer on each chunk.
-      // Before response_end: 8s watchdog.  After response_end: 1.5s.
+      // Before response_end: 8s watchdog.  After response_end: 800ms.
       if (speakingTimeoutRef.current) clearTimeout(speakingTimeoutRef.current);
       speakingTimeoutRef.current = setTimeout(
         () => speakingDoneRef.current?.(),
-        responseEndedRef.current ? 1500 : 8000,
+        responseEndedRef.current ? 800 : 8000,
       );
 
-      if (simliReadyRef.current) {
-        // Simli WebRTC connected — route audio through avatar (lip-sync + video)
-        avatarRef.current?.sendAudio(pcm);
-        // Report render latency on first audio chunk of each interaction
-        const audioSentMs = avatarRef.current?.getLastRenderStartMs() ?? 0;
-        if (audioSentMs > 0 && currentInteractionIdRef.current) {
-          const renderMs = Date.now() - audioSentMs + 33;
-          ws.sendJson({ type: 'avatar_rendered', interaction_id: currentInteractionIdRef.current, render_ms: renderMs });
-        }
-      } else {
-        // Simli not ready yet — play raw PCM directly via Web Audio API so voice works
-        try {
-          if (!audioCtxRef.current) {
-            audioCtxRef.current = new AudioContext({ sampleRate: 16000 });
-          }
-          const ctx = audioCtxRef.current;
-          // PCM is 16-bit signed LE — convert to Float32
-          const samples = pcm.length / 2;
-          const audioBuffer = ctx.createBuffer(1, samples, 16000);
-          const channel = audioBuffer.getChannelData(0);
-          const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-          for (let i = 0; i < samples; i++) {
-            channel[i] = view.getInt16(i * 2, true) / 32768;
-          }
-          const src = ctx.createBufferSource();
-          src.buffer = audioBuffer;
-          src.connect(ctx.destination);
-          src.start();
-        } catch (e) {
-          console.warn('[Audio fallback] playback error:', e);
-        }
+      // Client avatar handles audio playback + lip sync directly — no WebRTC routing needed
+      avatarRef.current?.sendAudio(pcm);
+      // Report render latency on first audio chunk of each interaction
+      const audioSentMs = avatarRef.current?.getLastRenderStartMs() ?? 0;
+      if (audioSentMs > 0 && currentInteractionIdRef.current) {
+        const renderMs = Date.now() - audioSentMs + 1; // client-side render is sub-ms
+        ws.sendJson({ type: 'avatar_rendered', interaction_id: currentInteractionIdRef.current, render_ms: renderMs });
       }
     });
   }, [ws]);
@@ -484,9 +469,7 @@ function App() {
         {/* Main */}
         <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
 
-          {/* Landing overlay — shown before topic is selected.
-              Rendered on top while the session layout (with AvatarVideo) mounts
-              in the background so the Simli WebRTC handshake starts immediately. */}
+          {/* Landing overlay — shown before topic is selected. */}
           {!topic && (
             <div style={{
               position: 'absolute', inset: 0, zIndex: 10,
@@ -531,9 +514,7 @@ function App() {
             </div>
           )}
 
-          {/* Session layout — always mounted so AvatarVideo's WebRTC handshake
-              begins on page load (not after topic selection). Hidden via display:none
-              while on the landing page; the component stays mounted throughout. */}
+          {/* Session layout — always mounted. ClientAvatar is instant (no WebRTC warmup). */}
           <div style={{
             height: '100%',
             display: topic ? 'grid' : 'none',
@@ -543,12 +524,12 @@ function App() {
 
             {/* Left */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minHeight: 0, overflow: 'hidden' }}>
-              <AvatarVideo
+              <ClientAvatar
                 ref={avatarRef}
                 isActive={isAvatarActive}
-                onWebRTCReady={(ms) => {
+                onReady={(ms) => {
                   setWebRTCReadyMs(ms);
-                  simliReadyRef.current = true;
+                  avatarReadyRef.current = true;
                 }}
               />
 
