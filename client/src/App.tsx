@@ -57,6 +57,10 @@ function App() {
   // VAD state, which causes speech_final to never fire on the next utterance.
   const micMutedRef = useRef(false);
   const micUnmuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Hard-deadline unmute timer (set on response_end) — stored in a ref so it
+  // can be cancelled when a new response starts, preventing stale timers from
+  // unmuting the mic mid-response.
+  const hardUnmuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Manual mute toggle — user-controlled, independent of the half-duplex gate.
   const [isMicMuted, setIsMicMuted] = useState(false);
   const manualMuteRef = useRef(false);
@@ -97,6 +101,7 @@ function App() {
       console.warn('[Mic] WS reconnected mid-session — resetting pipeline state');
       if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
       if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+      if (hardUnmuteTimerRef.current) { clearTimeout(hardUnmuteTimerRef.current); hardUnmuteTimerRef.current = null; }
       isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
       responseEndedRef.current = false;
       streamingTextRef.current = '';
@@ -108,23 +113,30 @@ function App() {
     }
   }, [ws.isConnected, mic.isRecording]);
 
-  // 5s watchdog: force-unmute if mic is stuck muted while AI is not actively responding.
-  // Catches all edge cases (WS drops, TTS failures, timer race conditions) with a max
-  // "stuck" window of 5s. Condition: muted + AI not streaming tokens = safe to unmute.
+  // 3s watchdog: force-unmute if mic is stuck muted while no audio is actually playing.
+  // Evaluates actual Web Audio playback state (not timer state) to catch all edge cases.
   useEffect(() => {
     if (!mic.isRecording) return;
     const watchdog = setInterval(() => {
+      // Periodic state dump (even when mic is open) to help diagnose stuck states
+      const remainingNow = avatarRef.current?.getRemainingPlayMs() ?? 0;
+      console.log(
+        `[Watchdog] micMuted=${micMutedRef.current} aiResponding=${isAiRespondingRef.current} ` +
+        `responseEnded=${responseEndedRef.current} remainingMs=${remainingNow} ` +
+        `avatarActive=${isAvatarActive} speakingTimeout=${!!speakingTimeoutRef.current}`
+      );
+      if (!micMutedRef.current) return; // mic is already open — nothing to do
+
       const hungPipeline = isAiRespondingRef.current &&
         aiRespondingStartRef.current > 0 &&
         Date.now() - aiRespondingStartRef.current > 15000;
-      // Don't fire while audio is still playing (speakingTimeout active) or while
-      // a dynamic unmute timer is pending (waiting for Web Audio playback to finish).
-      // Firing during either would open the mic during TTS playback, causing speaker
-      // echo to be transcribed as user speech and breaking the next interaction.
-      const audioStillPlaying = speakingTimeoutRef.current !== null;
-      const unmuteScheduled = micUnmuteTimerRef.current !== null;
-      if (micMutedRef.current && !audioStillPlaying && !unmuteScheduled && (!isAiRespondingRef.current || hungPipeline)) {
-        console.warn(`[Watchdog] Mic stuck muted — ${hungPipeline ? 'pipeline hung >15s' : 'AI not responding'} — force unmuting`);
+
+      // Check actual audio playback state — not timer refs
+      const remainingMs = avatarRef.current?.getRemainingPlayMs() ?? 0;
+      const audioStillPlaying = remainingMs >= 150;
+
+      if (!audioStillPlaying && (!isAiRespondingRef.current || hungPipeline)) {
+        console.warn(`[Watchdog] Mic stuck muted — ${hungPipeline ? 'pipeline hung >15s' : 'AI not responding'}, remainingMs=${remainingMs} — force unmuting`);
         if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
         if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
         isAiRespondingRef.current = false; aiRespondingStartRef.current = 0;
@@ -132,7 +144,7 @@ function App() {
         setIsAvatarActive(false);
         micMutedRef.current = false;
       }
-    }, 5000);
+    }, 3000);
     return () => clearInterval(watchdog);
   }, [mic.isRecording]);
 
@@ -181,19 +193,24 @@ function App() {
           audioReceivedRef.current = false; // reset audio-received flag for this response
           setAudioMissed(false);
           currentInteractionIdRef.current = msg.interaction_id ?? currentInteractionIdRef.current;
-          // Mute mic on first token — TTS echo will start arriving soon
-          micMutedRef.current = true;
           if (isFirstToken) {
+            // Cancel ALL stale unmute timers from the previous response before muting.
+            // Without this, a pending unmute timer fires mid-response, briefly opens
+            // the mic, TTS echo corrupts Deepgram's VAD, and subsequent utterances fail.
+            const hadStaleTimer = !!micUnmuteTimerRef.current || !!hardUnmuteTimerRef.current || !!speakingTimeoutRef.current;
+            if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+            if (hardUnmuteTimerRef.current) { clearTimeout(hardUnmuteTimerRef.current); hardUnmuteTimerRef.current = null; }
+            if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
+            console.log(`[MicGate] Muting for new response. Stale timers cancelled: ${hadStaleTimer}`);
             // Safety unmute: if response_end is ever lost (e.g. WS drop mid-pipeline),
             // this guarantees the mic unmutes within 8s regardless.
-            // The response_end handler's 1.5s timer replaces this in the normal flow.
-            if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
             micUnmuteTimerRef.current = setTimeout(() => {
               console.warn('[Mic] Safety unmute fired — response_end may have been lost');
               micMutedRef.current = false;
             }, 8000);
-            console.log('[Mic] Muted — response started');
           }
+          // Mute mic — TTS echo will start arriving soon
+          micMutedRef.current = true;
           streamingTextRef.current += msg.text;
           setStreamingText(streamingTextRef.current);
           break;
@@ -227,20 +244,21 @@ function App() {
             console.log(`[LipSync] avg=${avgOffset}ms max=${maxOffset}ms samples=${samples.length}`);
           }
           // Reset timing + lip-sync stats for the next interaction.
-          // Do NOT flush or clear the rechunk buffer here — Cartesia audio
-          // chunks are still in-flight after response_end (LLM finishes before
-          // TTS). Flushing here inserts a zero-padded silence frame mid-speech,
-          // causing audible choppiness. The speaking timeout handles the flush.
+          // Do NOT call resetPlaybackClock() here — TTS audio chunks are still
+          // arriving after response_end (LLM finishes before TTS). Resetting the
+          // playback clock mid-stream causes new chunks to overlap already-queued
+          // ones, cutting audio short. resetPlaybackClock() is called in speakingDone
+          // after all audio has actually finished playing.
           avatarRef.current?.resetStats();
-          // Detect audio failure: check 2.5s after response_end, not immediately.
+          // Detect audio failure: check 4s after response_end, not immediately.
           // Audio binary frames often arrive AFTER response_end (TTS still streaming),
           // so checking at response_end gives a false positive on every response.
           setTimeout(() => {
             if (!audioReceivedRef.current) {
-              console.warn('[Audio] No audio received 2.5s after response_end — possible TTS failure');
+              console.warn('[Audio] No audio received 4s after response_end — possible TTS failure');
               setAudioMissed(true);
             }
-          }, 2500);
+          }, 4000);
           // Mark response as ended — trailing audio chunks will now use the 3s timer
           // instead of the 8s watchdog (see ws.onAudio handler).
           responseEndedRef.current = true;
@@ -252,9 +270,28 @@ function App() {
             clearTimeout(speakingTimeoutRef.current);
             speakingTimeoutRef.current = setTimeout(() => speakingDoneRef.current?.(), 800);
           }
-          // No-audio case: if TTS fails entirely and no audio arrives, the 8s safety
-          // timer set on first token handles unmute. The fast-forward above handles
-          // exchanges where audio was already in-flight before response_end arrived.
+          // AUDIO-AWARE hard deadline: guarantee mic reopens after response_end,
+          // but NEVER while audio is still playing — opening the mic during TTS
+          // playback sends echo to Deepgram, corrupting its VAD and breaking
+          // subsequent utterances. Checks every 500ms after the initial 2.5s.
+          if (hardUnmuteTimerRef.current) clearTimeout(hardUnmuteTimerRef.current);
+          const hardUnmuteCheck = () => {
+            if (!micMutedRef.current) { hardUnmuteTimerRef.current = null; return; }
+            const remaining = avatarRef.current?.getRemainingPlayMs() ?? 0;
+            if (remaining > 200) {
+              // Audio still playing — check again after it finishes + margin
+              console.log(`[Mic] Hard unmute deferred — ${remaining}ms audio remaining`);
+              hardUnmuteTimerRef.current = setTimeout(hardUnmuteCheck, Math.min(remaining + 200, 1000));
+              return;
+            }
+            hardUnmuteTimerRef.current = null;
+            console.warn('[Mic] HARD UNMUTE — audio finished, mic still muted');
+            micMutedRef.current = false;
+            if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
+            if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+            setIsAvatarActive(false);
+          };
+          hardUnmuteTimerRef.current = setTimeout(hardUnmuteCheck, 2500);
           break;
         }
 
@@ -283,10 +320,10 @@ function App() {
       // doesn't fire speakingDone prematurely on the NEXT exchange.
       speakingTimeoutRef.current = null;
       setIsAvatarActive(false);
-      // Only reset stats — do NOT call resetForInteraction() here.
-      // Client-side audio may still be playing (scheduled via Web Audio API).
-      // resetForInteraction() stops all active sources, cutting audio mid-sentence.
-      // Barge-in (handleBargeIn) calls resetForInteraction() explicitly to force-stop.
+      // Reset playback clock now that all audio has finished playing.
+      // This syncs nextPlayTime back to currentTime, preventing accumulated
+      // drift from inflating future getRemainingPlayMs() values.
+      avatarRef.current?.resetPlaybackClock();
       avatarRef.current?.resetStats();
       // Dynamic mic unmute: wait for scheduled Web Audio playback to finish.
       // Web Audio API schedules chunks ahead via nextPlayTime — audio may still be
@@ -342,6 +379,7 @@ function App() {
     if (speakingTimeoutRef.current) { clearTimeout(speakingTimeoutRef.current); speakingTimeoutRef.current = null; }
     micMutedRef.current = false;
     if (micUnmuteTimerRef.current) { clearTimeout(micUnmuteTimerRef.current); micUnmuteTimerRef.current = null; }
+    if (hardUnmuteTimerRef.current) { clearTimeout(hardUnmuteTimerRef.current); hardUnmuteTimerRef.current = null; }
     // Satisfy browser autoplay policy — must be called from within a user gesture handler.
     // Simli pre-warms before any interaction, so the audio/video elements need an explicit
     // .play() triggered by this click to avoid "NotAllowedError: play() failed" errors.
@@ -350,14 +388,16 @@ function App() {
     setSessionElapsed(0);
     ws.connect();
     setTimeout(async () => {
-      let _warnedDropped = false;
+      let _lastGateLog = 0;
       await mic.startRecording((audioData) => {
-        if (micMutedRef.current) {
-          if (!_warnedDropped) { console.warn('[Mic] Audio dropped — micMuted=true'); _warnedDropped = true; }
+        if (micMutedRef.current || manualMuteRef.current) {
+          const now = Date.now();
+          if (now - _lastGateLog > 2000) {
+            _lastGateLog = now;
+            console.log('[MIC GATE] BLOCKED — micMuted:', micMutedRef.current, 'manualMute:', manualMuteRef.current);
+          }
           return;
         }
-        _warnedDropped = false;
-        if (manualMuteRef.current) return;
         ws.sendAudio(audioData);
       }, micDeviceId);
     }, 500);
@@ -383,6 +423,8 @@ function App() {
     // Unmute mic immediately so user can speak right away
     if (micUnmuteTimerRef.current) clearTimeout(micUnmuteTimerRef.current);
     micUnmuteTimerRef.current = null;
+    if (hardUnmuteTimerRef.current) clearTimeout(hardUnmuteTimerRef.current);
+    hardUnmuteTimerRef.current = null;
     micMutedRef.current = false;
     // Tell server to abort the current pipeline
     ws.sendJson({ type: 'interrupt' });

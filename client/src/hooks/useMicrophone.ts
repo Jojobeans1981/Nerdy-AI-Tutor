@@ -126,6 +126,7 @@ export function useMicrophone(): UseMicrophoneReturn {
   }, []);
 
   const stopRecording = useCallback(() => {
+    console.log('[Mic] stopRecording called — stack:', new Error().stack);
     cancelAnimationFrame(rafRef.current);
     analyserRef.current?.disconnect();
     analyserRef.current = null;

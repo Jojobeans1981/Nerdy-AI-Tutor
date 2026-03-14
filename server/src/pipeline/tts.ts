@@ -69,12 +69,8 @@ export class CartesiaTTS {
   private streamDone = false;
   // Set true once the final (continue=false) chunk has been sent.
   private finalSent = false;
-  // Count chunks queued vs done:true received.
-  // doneResolve() only fires when finalSent AND all sent chunks are acknowledged —
-  // Cartesia sends done:true after EACH segment (including continue=true ones), so
-  // we must wait for ALL segments to complete, not just the first done:true.
+  // Count of chunks sent to Cartesia (for logging only)
   private chunksQueued = 0;
-  private chunksCompleted = 0;
   private connectMs = 0;
   private isFirstAudio = true;
   private doneResolve!: () => void;
@@ -83,16 +79,17 @@ export class CartesiaTTS {
   private contextId = '';
   // Chunks queued before the WS opened (drained on 'open')
   private pendingChunks: Array<{ text: string; continueStream: boolean }> = [];
-  // True once the 'close' event has fired — abort() returns immediately if set.
-  // Prevents a 1s timeout stall when Cartesia closes the WS right after done:true
-  // (before abort() is called, the event would already have fired).
-  private wsClosed = false;
+  // Prevent double-close races when abort() is called concurrently
+  private isAborting = false;
+  // Resolved by waitForComplete() when any completion condition fires
+  private completionResolve: (() => void) | null = null;
 
   constructor(private cb: TtsCallbacks) {
     this.done = new Promise<void>(r => { this.doneResolve = r; });
   }
 
   connect(): void {
+    console.log('[TTS] connect() called');
     this.connectMs = Date.now();
     this.contextId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     this.ws = new WebSocket(WS_URL());
@@ -113,15 +110,14 @@ export class CartesiaTTS {
       } else {
         try {
           const msg = JSON.parse((data as Buffer).toString());
+          console.log('[TTS] Cartesia message received:', JSON.stringify(msg).slice(0, 200));
           if (msg.data) this._onAudio(Buffer.from(msg.data, 'base64'));
-          if (msg.done === true) {
-            this.chunksCompleted++;
-            const allDone = this.finalSent && this.chunksCompleted >= this.chunksQueued;
-            console.log(`[TTS] Cartesia segment done (${this.chunksCompleted}/${this.chunksQueued} finalSent=${this.finalSent})`);
-            if (allDone) {
-              this.streamDone = true;
-              this.doneResolve();
-            }
+          if (msg.type === 'done' && msg.done === true) {
+            console.log('[TTS] waitForComplete resolved via done message');
+            this.streamDone = true;
+            this.doneResolve();
+            this.completionResolve?.();
+            this.completionResolve = null;
           }
           if (msg.error) {
             console.error('[TTS] Cartesia error:', JSON.stringify(msg.error));
@@ -133,7 +129,6 @@ export class CartesiaTTS {
     });
 
     this.ws.on('close', (code, reason) => {
-      this.wsClosed = true;
       const reasonStr = reason?.toString() || '';
       if (!this.streamDone) {
         console.error(`[TTS] Cartesia WS closed unexpectedly  code=${code}  reason="${reasonStr}"`);
@@ -190,20 +185,42 @@ export class CartesiaTTS {
       this._flushChunk(text, false); // continue=false: finalises the Cartesia context
     } else {
       // All text was already flushed via sentence streaming — no more text to send.
-      // Mark finalSent so the message handler knows we're done, then resolve if
-      // all sent chunks have already received their done:true acknowledgment.
+      // The done message from Cartesia will resolve waitForComplete().
       this.finalSent = true;
-      console.log(`[TTS] endStream — buffer empty, all sentences pre-flushed (${this.chunksCompleted}/${this.chunksQueued} acked)`);
-      if (this.chunksCompleted >= this.chunksQueued) {
-        this.streamDone = true;
-        this.doneResolve();
-      }
-      // If chunksCompleted < chunksQueued, the message handler will call
-      // doneResolve() when the last done:true arrives.
+      console.log(`[TTS] endStream — buffer empty, all sentences pre-flushed (queued=${this.chunksQueued})`);
     }
   }
 
-  waitForComplete(): Promise<void> { return this.done; }
+  waitForComplete(): Promise<void> {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        this.ws?.off('close', onClose);
+        clearTimeout(ceiling);
+        resolve();
+      };
+
+      // Condition 1: Cartesia sends done message (primary path)
+      this.completionResolve = done;
+      // If done already fired before waitForComplete was called, resolve immediately
+      if (this.streamDone) { done(); return; }
+
+      // Condition 2: WebSocket closes before done arrives
+      const onClose = () => {
+        console.log('[TTS] WS closed — resolving waitForComplete via close fallback');
+        done();
+      };
+      this.ws?.once('close', onClose);
+
+      // Condition 3: Absolute 8 second ceiling — nothing should ever take longer
+      const ceiling = setTimeout(() => {
+        console.warn('[TTS] waitForComplete ceiling hit (8s) — forcing resolve');
+        done();
+      }, 8000);
+    });
+  }
 
   /**
    * Close the Cartesia WS and return a Promise that resolves when the socket
@@ -219,26 +236,60 @@ export class CartesiaTTS {
    * instead of waiting the full 1s timeout.
    */
   abort(): Promise<void> {
+    console.log(`[TTS] abort() called — ws readyState: ${this.ws?.readyState ?? 'null'}  isAborting: ${this.isAborting}`);
     this.doneResolve(); // unblock any waiters
-    if (!this.ws) return Promise.resolve();
+
+    // Already aborting — prevent double-close races
+    if (this.isAborting) { console.log('[TTS] abort() — already aborting, returning'); return Promise.resolve(); }
+    if (!this.ws) { console.log('[TTS] abort() — no ws, returning'); return Promise.resolve(); }
+
+    this.isAborting = true;
     const ws = this.ws;
     this.ws = null;
-    // Already closed (Cartesia closed their side right after done:true)
-    if (this.wsClosed) return Promise.resolve();
+
+    // Remove data listeners immediately to prevent processing stale frames
+    ws.removeAllListeners('message');
+    ws.removeAllListeners('open');
+
+    const readyState = ws.readyState;
+
+    // CLOSED — already done
+    if (readyState === WebSocket.CLOSED) {
+      this.isAborting = false;
+      return Promise.resolve();
+    }
+
+    // CLOSING — wait up to 800ms for the close event, then resolve regardless
+    if (readyState === WebSocket.CLOSING) {
+      return new Promise<void>(resolve => {
+        const timeout = setTimeout(() => { this.isAborting = false; resolve(); }, 800);
+        const done = () => { clearTimeout(timeout); this.isAborting = false; resolve(); };
+        ws.once('close', done);
+        ws.once('error', done);
+      });
+    }
+
+    // OPEN or CONNECTING — initiate close, wait up to 2s
     return new Promise<void>(resolve => {
-      const timeout = setTimeout(resolve, 500); // safety fallback (reduced from 1s)
-      const done = () => { clearTimeout(timeout); resolve(); };
+      const timeout = setTimeout(() => { this.isAborting = false; resolve(); }, 2000);
+      const done = () => { clearTimeout(timeout); this.isAborting = false; resolve(); };
       ws.once('close', done);
-      ws.once('error', done); // handle close-time errors without crashing Node
-      ws.removeAllListeners('message');
-      ws.removeAllListeners('open');
-      ws.close();
+      ws.once('error', done);
+      try {
+        ws.close();
+      } catch {
+        // close() can throw if the socket is in a bad state
+        clearTimeout(timeout);
+        this.isAborting = false;
+        resolve();
+      }
     });
   }
 
   private _flushChunk(text: string, continueStream: boolean): void {
     if (!continueStream) this.finalSent = true;
     this.chunksQueued++;
+    console.log(`[TTS] Expecting ${this.chunksQueued} total segments (continue=${continueStream})`);
     if (!this.wsOpen) {
       this.pendingChunks.push({ text, continueStream });
       return;

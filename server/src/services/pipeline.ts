@@ -49,6 +49,9 @@ export class TutorSession {
   private prefetchedVerify: Promise<'correct' | 'incorrect' | 'unknown'> | null = null;
   private prefetchedTranscript = '';
 
+  /** Optional callback — called at the top of _runPipeline so STT can activate keepAlive */
+  public onPipelineStart: (() => void) | null = null;
+
   constructor(private ws: ClientWS, private concept: string = 'fractions') {}
 
   /** Called by the WebSocket handler when the client reports avatar render latency */
@@ -116,6 +119,7 @@ export class TutorSession {
       await this._runPipeline(transcript, interactionId, sttMs);
     } finally {
       this.isBusy = false;
+      console.log(`[Pipeline] isBusy released — ready for next utterance`);
       // Process queued utterance if any
       if (this.pendingUtterance) {
         const pending = this.pendingUtterance;
@@ -132,8 +136,19 @@ export class TutorSession {
     interactionId: string,
     sttMs: number,
   ): Promise<void> {
+    console.log(`[Pipeline] _runPipeline START  id=${interactionId}  text="${transcript.slice(0, 60)}"`);
+    this.onPipelineStart?.();
     this.currentAbortController = new AbortController();
     const { signal } = this.currentAbortController;
+
+    // 45s safety fuse: if _runPipeline hasn't returned by then, force-reset isBusy
+    // so subsequent utterances aren't permanently blocked.
+    const safetyFuse = setTimeout(() => {
+      if (this.isBusy) {
+        console.error(`[Pipeline] SAFETY FUSE: isBusy still true after 45s — force-resetting  id=${interactionId}`);
+        this.isBusy = false;
+      }
+    }, 45000);
 
     // FIX 6: increment attempt count; compute hint level before calling LLM
     this.attemptCountOnCurrentConcept++;
@@ -192,6 +207,7 @@ export class TutorSession {
     let fullResponse = '';
     let llmCompleted = false;
     let historyPushed = false;
+    let responseEndSent = false;
     try {
       let isFirstToken = true;
 
@@ -246,6 +262,7 @@ export class TutorSession {
       // audio chunks continue streaming in the background via onAudioChunk.
       console.log(`[Pipeline] response_end  length=${fullResponse.length}`);
       this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId }));
+      responseEndSent = true;
 
       // BUG 2 FIX: fire session state extraction after audio is queued — non-blocking
       this.lastStudentUtterance = transcript;
@@ -281,27 +298,38 @@ export class TutorSession {
         }
       });
 
-      // Wait up to 8s for Cartesia to finish streaming audio + send done:true.
-      // Audio chunks are forwarded to the client as they arrive, but abort() closes
-      // the WS and kills any remaining synthesis — so we must wait long enough for
-      // the full response to be synthesized. 8s covers longer Socratic responses.
-      let ttsTimedOut = false;
-      const ttsTimeout = new Promise<void>(r => setTimeout(() => { ttsTimedOut = true; r(); }, 8000));
-      await Promise.race([tts.waitForComplete(), ttsTimeout]);
-      if (ttsTimedOut) console.warn(`[Pipeline] TTS completion timeout (8s) — aborting Cartesia WS`);
+      // Wait for TTS to finish BEFORE releasing isBusy — prevents concurrent
+      // Cartesia WS connections (free tier rejects them).
+      console.log(`[Pipeline] Waiting for TTS completion...  id=${interactionId}`);
+      try {
+        let ttsTimedOut = false;
+        const ttsTimeout = new Promise<void>(r => setTimeout(() => { ttsTimedOut = true; r(); }, 5000));
+        await Promise.race([tts.waitForComplete(), ttsTimeout]);
+        if (ttsTimedOut) console.warn(`[Pipeline] TTS completion timeout (5s) — aborting Cartesia WS`);
+      } catch { /* swallow */ }
+      await Promise.race([tts.abort(), new Promise<void>(r => setTimeout(r, 1500))]).catch(() => {});
+      console.log(`[Pipeline] TTS done or timed out — entering finally  id=${interactionId}`);
     } catch (err) {
       console.error('[Pipeline] LLM/TTS stream error:', err);
       // Notify the client so the UI doesn't stay frozen waiting for response_end
-      try { this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true })); } catch { /* WS closed */ }
+      try { this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true })); responseEndSent = true; } catch { /* WS closed */ }
       // Save partial response to history so conversation context isn't lost
       if (fullResponse && !historyPushed) {
         this.history.push({ role: 'user', content: transcript });
         this.history.push({ role: 'assistant', content: llmCompleted ? fullResponse : fullResponse + '…' });
       }
+      // Synchronous TTS abort — must complete before isBusy releases
+      await Promise.race([tts.abort(), new Promise<void>(r => setTimeout(r, 1500))]).catch(() => {});
     } finally {
-      // Always close the Cartesia WS and wait for it to fully close before the next pipeline runs.
-      await tts.abort();
+      console.log(`[Pipeline] FINALLY block entered  id=${interactionId}  responseEndSent=${responseEndSent}`);
+      // Guarantee response_end reaches the client even if both try and catch failed to send it
+      if (!responseEndSent) {
+        console.warn(`[Pipeline] response_end not sent — sending from finally block  id=${interactionId}`);
+        try { this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true })); } catch { /* WS closed */ }
+      }
       this.currentAbortController = null;
+      clearTimeout(safetyFuse);
+      console.log(`[Pipeline] FINALLY block complete  id=${interactionId}`);
     }
 
     tracker.mark('pipeline_end');

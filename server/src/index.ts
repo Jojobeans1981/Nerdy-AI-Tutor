@@ -68,8 +68,10 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
   const session = new TutorSession(ws, concept);
   let interactionCount = 0;
+  let audioFlowing = false;
 
   // ── Deepgram STT — one persistent connection per WebSocket session ──────────
+  // stt is created below; wire pipeline→STT keepAlive after both exist
   const stt = new DeepgramSTT({
     onInterim: (text) => {
       ws.send(JSON.stringify({ type: 'transcript', text, is_final: false }));
@@ -84,6 +86,7 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       ws.send(JSON.stringify({ type: 'transcript', text, is_final: true }));
 
       interactionCount++;
+      audioFlowing = false; // reset so we can detect when audio resumes after this pipeline
       const interactionId = `int_${Date.now()}_${interactionCount}`;
       console.log(`[STT] Utterance #${interactionCount}: "${text}"  stt_ms=${sttMs}`);
 
@@ -100,62 +103,78 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
   stt.connect();
 
+  // Wire pipeline → STT keepAlive: when pipeline starts, activate keepAlive immediately
+  session.onPipelineStart = () => stt.onPipelineStart();
+
   // ── Receive messages from client ────────────────────────────────────────────
   ws.on('message', (data: Buffer | string) => {
-    if (typeof data === 'string') {
-      try {
-        const msg = JSON.parse(data);
-        if (msg.type === 'audio_config') {
-          console.log('[WS] Audio config:', msg);
-          return;
-        }
-        if (msg.type === 'text_input') {
-          const text = (typeof msg.text === 'string' ? msg.text : '').trim();
-          if (!text) return;
-          interactionCount++;
-          const interactionId = `int_${Date.now()}_${interactionCount}`;
-          // Confirm as final transcript so client shows the message
-          ws.send(JSON.stringify({ type: 'transcript', text, is_final: true }));
-          console.log(`[Text] Input #${interactionCount}: "${text}"`);
-          session.processUtterance(text, interactionId, 0).catch((err) => {
-            console.error('[Pipeline] Error:', err);
-            ws.send(JSON.stringify({ type: 'error', message: 'Pipeline error' }));
-          });
-          return;
-        }
-        if (msg.type === 'interrupt') {
-          session.interrupt();
-          return;
-        }
-        if (msg.type === 'avatar_rendered') {
-          const renderMs = typeof msg.render_ms === 'number' ? msg.render_ms : -1;
-          console.log(`[WS] avatar_rendered  id=${msg.interaction_id ?? 'unknown'}  render_ms=${renderMs}`);
-          session.reportAvatarRender(msg.interaction_id, renderMs);
-          return;
-        }
-        if (msg.type === 'lip_sync_report') {
-          console.log(
-            `[LipSync] id=${msg.interaction_id}  avg=${msg.avg_offset_ms}ms  max=${msg.max_offset_ms}ms  ` +
-            `within_45ms=${Math.round((msg.within_45ms ?? 0) * 100)}%  within_80ms=${Math.round((msg.within_80ms ?? 0) * 100)}%  ` +
-            `samples=${msg.sample_count}`,
-          );
-          return;
-        }
-      } catch { /* not JSON */ }
-      return;
-    }
+    try {
+      if (typeof data === 'string') {
+        try {
+          const msg = JSON.parse(data);
+          if (msg.type === 'audio_config') {
+            console.log('[WS] Audio config:', msg);
+            return;
+          }
+          if (msg.type === 'text_input') {
+            const text = (typeof msg.text === 'string' ? msg.text : '').trim();
+            if (!text) return;
+            interactionCount++;
+            const interactionId = `int_${Date.now()}_${interactionCount}`;
+            // Confirm as final transcript so client shows the message
+            ws.send(JSON.stringify({ type: 'transcript', text, is_final: true }));
+            console.log(`[Text] Input #${interactionCount}: "${text}"`);
+            session.processUtterance(text, interactionId, 0).catch((err) => {
+              console.error('[Pipeline] Error:', err);
+              ws.send(JSON.stringify({ type: 'error', message: 'Pipeline error' }));
+            });
+            return;
+          }
+          if (msg.type === 'interrupt') {
+            session.interrupt();
+            return;
+          }
+          if (msg.type === 'avatar_rendered') {
+            const renderMs = typeof msg.render_ms === 'number' ? msg.render_ms : -1;
+            console.log(`[WS] avatar_rendered  id=${msg.interaction_id ?? 'unknown'}  render_ms=${renderMs}`);
+            session.reportAvatarRender(msg.interaction_id, renderMs);
+            return;
+          }
+          if (msg.type === 'lip_sync_report') {
+            console.log(
+              `[LipSync] id=${msg.interaction_id}  avg=${msg.avg_offset_ms}ms  max=${msg.max_offset_ms}ms  ` +
+              `within_45ms=${Math.round((msg.within_45ms ?? 0) * 100)}%  within_80ms=${Math.round((msg.within_80ms ?? 0) * 100)}%  ` +
+              `samples=${msg.sample_count}`,
+            );
+            return;
+          }
+        } catch { /* not JSON */ }
+        return;
+      }
 
-    // Binary = raw PCM audio — forward to Deepgram.
-    // Must use new Uint8Array(data) to get an exact-size copy;
-    // data.buffer is the pooled backing ArrayBuffer which is larger than data.
-    if (Buffer.isBuffer(data)) {
-      stt.sendAudio(new Uint8Array(data).buffer as ArrayBuffer);
+      // Binary = raw PCM audio — forward to Deepgram.
+      // Must use new Uint8Array(data) to get an exact-size copy;
+      // data.buffer is the pooled backing ArrayBuffer which is larger than data.
+      if (Buffer.isBuffer(data)) {
+        // Log first audio chunk after each silence gap to confirm audio path is live
+        if (!audioFlowing) {
+          audioFlowing = true;
+          console.log(`[WS] Audio flowing again (${data.length} bytes)`);
+        }
+        stt.sendAudio(new Uint8Array(data).buffer as ArrayBuffer);
+      }
+    } catch (err) {
+      console.error('[WS Server] Unhandled error in message handler:', err);
     }
   });
 
-  ws.on('close', () => {
-    console.log('[WS] Client disconnected');
+  ws.on('close', (code: number, reason: Buffer) => {
+    console.log(`[WS Server] Client disconnected — code: ${code}  reason: "${reason.toString()}"`);
     stt.close();
+  });
+
+  ws.on('error', (err: Error) => {
+    console.error('[WS Server] WebSocket error:', err);
   });
 });
 

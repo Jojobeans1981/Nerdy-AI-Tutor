@@ -91,9 +91,9 @@ export function useWebSocket(url: string): UseWebSocketReturn {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setIsConnected(false);
-      console.log('[WS] Disconnected');
+      console.log(`[WS] Closed — code: ${event.code}  reason: "${event.reason}"  wasClean: ${event.wasClean}`);
       // FIX 7: schedule reconnect unless user explicitly disconnected
       if (!intentionalDisconnectRef.current) {
         scheduleReconnect();
