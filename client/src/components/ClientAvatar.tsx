@@ -47,7 +47,7 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 function drawEye(
   ctx: CanvasRenderingContext2D,
   ex: number, ey: number, size: number,
-  blinkScale: number, active: boolean, amp: number, glowPulse: number,
+  blinkScale: number, active: boolean, amp: number, _glowPulse: number,
 ) {
   const sw = size * 1.25;  // sclera width (bigger = cuter)
   const sh = size * 1.05;  // sclera height
