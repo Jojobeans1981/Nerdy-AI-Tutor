@@ -44,7 +44,7 @@ export async function preloadVoice(): Promise<string> {
 
   const pick =
     voices.find(v => v.language === 'en' && v.is_public &&
-      (v.description?.toLowerCase().includes('male') || v.name?.toLowerCase().match(/\b(man|male|guy|liam|james|josh|adam)\b/))) ??
+      (v.description?.toLowerCase().includes('female') || v.name?.toLowerCase().match(/\b(woman|female|girl|janet|sarah|emma|sophia)\b/))) ??
     voices.find(v => v.language === 'en' && v.is_public) ??
     voices[0];
 
