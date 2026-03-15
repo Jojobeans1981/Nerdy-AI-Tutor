@@ -9,7 +9,6 @@
 import { LatencyTracker, storeReport, updateAvatarRender } from '../utils/latency.js';
 import { streamLLM, extractSessionUpdate, verifyStudentAnswer, type ChatMessage, type SessionContext } from '../pipeline/llm.js';
 import { CartesiaTTS } from '../pipeline/tts.js';
-import { lookupTtsCache } from '../utils/ttsCache.js';
 import type { WebSocket as ClientWS } from 'ws';
 
 // BUG 1 FIX: track cache hit rate across all sessions
@@ -234,23 +233,8 @@ export class TutorSession {
 
       llmCompleted = true;
 
-      // BUG 1 FIX: check TTS cache before calling Cartesia
-      const cachedAudio = lookupTtsCache(fullResponse);
-      if (cachedAudio) {
-        cacheHits++;
-        console.log(`[TTS Cache] HIT for: "${fullResponse.substring(0, 50)}..."`);
-        tts.abort(); // close buffered WS without synthesizing — doneResolve() fires here
-        tracker.mark('tts_first_byte');
-        const audioFrame = Buffer.allocUnsafe(1 + cachedAudio.length);
-        audioFrame[0] = 0x01;
-        cachedAudio.copy(audioFrame, 1);
-        try { this.ws.send(audioFrame); } catch { /* WS closed */ }
-      } else {
-        cacheMisses++;
-        console.log('[TTS Cache] MISS — calling Cartesia');
-        // Send full text to Cartesia — it streams audio back as it synthesizes
-        tts.endStream();
-      }
+      // TTS cache disabled (was Cartesia-specific) — synthesize via Edge TTS
+      tts.endStream();
 
       // Update conversation history immediately (LLM is done)
       this.history.push({ role: 'user', content: transcript });

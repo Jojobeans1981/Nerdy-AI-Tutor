@@ -1,194 +1,92 @@
 /**
- * TTS module — Cartesia Sonic streaming WebSocket.
+ * TTS module — Microsoft Edge TTS (free, no API key required).
  *
- * connect() is FIRE-AND-FORGET — the WS handshake overlaps the LLM call.
- * All tokens are accumulated locally and sent in ONE request when endStream()
- * fires, so Cartesia gets the full text at once and starts synthesizing immediately.
- * Single-chunk approach avoids multi-done:true sequencing issues with Cartesia's API.
+ * Replaces Cartesia Sonic. Uses msedge-tts to synthesize MP3, then decodes
+ * to 16-bit 16kHz mono PCM via ffmpeg-static so the existing client binary
+ * protocol works unchanged.
+ *
+ * connect() is a no-op (no persistent WS needed).
+ * Tokens accumulate via sendToken(); endStream() triggers synthesis.
  */
-import { WebSocket } from 'ws';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
+import { spawn, type ChildProcess } from 'child_process';
+import ffmpegPath from 'ffmpeg-static';
 
 // Prevents avatar mouth-open artifact before audio playback starts
 function generateSilenceBuffer(durationMs: number, sampleRate = 16000): Buffer {
-  // 16-bit PCM = 2 bytes per sample; fill with zeros = silence
   return Buffer.alloc(Math.floor(durationMs * sampleRate / 1000) * 2);
 }
 
-const API_KEY  = () => process.env.CARTESIA_API_KEY!;
-const VERSION  = '2024-06-10';
-const MODEL    = 'sonic-english';
-const WS_URL   = () =>
-  `wss://api.cartesia.ai/tts/websocket?api_key=${API_KEY()}&cartesia_version=${VERSION}`;
+// Voice name — Microsoft neural voice
+const VOICE = 'en-US-JennyNeural'; // Female, natural sounding
 
 // ── Voice resolution ──────────────────────────────────────────────────────────
-let cachedVoiceId = '';
-
 /**
- * Fetch available Cartesia voices and cache a suitable English male voice.
- * Called once at server startup so every TTS request has it ready.
+ * No-op for Edge TTS — voice is specified by name, not fetched from API.
+ * Returns empty string (no voice ID concept in Edge TTS).
  */
 export async function preloadVoice(): Promise<string> {
-  if (process.env.CARTESIA_VOICE_ID) {
-    cachedVoiceId = process.env.CARTESIA_VOICE_ID;
-    console.log(`[TTS] Cartesia voice (env): ${cachedVoiceId}`);
-    return cachedVoiceId;
-  }
-
-  const res = await fetch('https://api.cartesia.ai/voices', {
-    headers: { 'X-API-Key': API_KEY(), 'Cartesia-Version': VERSION },
-  });
-
-  if (!res.ok) throw new Error(`Cartesia voices fetch failed: ${res.status} ${await res.text()}`);
-
-  const voices: any[] = await res.json();
-
-  const pick =
-    voices.find(v => v.language === 'en' && v.is_public &&
-      (v.description?.toLowerCase().includes('female') || v.name?.toLowerCase().match(/\b(woman|female|girl|janet|sarah|emma|sophia)\b/))) ??
-    voices.find(v => v.language === 'en' && v.is_public) ??
-    voices[0];
-
-  cachedVoiceId = pick.id;
-  console.log(`[TTS] Cartesia voice selected: "${pick.name}" (${pick.id})`);
-  return cachedVoiceId;
+  console.log(`[TTS] Edge TTS voice: ${VOICE} (no API key required)`);
+  return '';
 }
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 export interface TtsCallbacks {
-  /** Raw PCM bytes (16-bit signed, 16kHz, mono) — no base64 encoding */
+  /** Raw PCM bytes (16-bit signed, 16kHz, mono) */
   onAudioChunk: (pcm: Buffer) => void;
   onFirstByte: (ms: number) => void;
   onError: (error: string, message: string) => void;
 }
 
-// ── CartesiaTTS ───────────────────────────────────────────────────────────────
+// ── EdgeTTS (drop-in replacement for CartesiaTTS) ─────────────────────────────
 export class CartesiaTTS {
-  private ws: WebSocket | null = null;
   private textBuffer = '';
-  private wsOpen = false;
-  private streamDone = false;
-  // Set true once the final (continue=false) chunk has been sent.
-  private finalSent = false;
-  // Count of chunks sent to Cartesia (for logging only)
-  private chunksQueued = 0;
   private connectMs = 0;
   private isFirstAudio = true;
   private doneResolve!: () => void;
   readonly done: Promise<void>;
-  // Stable context_id shared across all continue=true chunks for this response
-  private contextId = '';
-  // Chunks queued before the WS opened (drained on 'open')
-  private pendingChunks: Array<{ text: string; continueStream: boolean }> = [];
-  // Prevent double-close races when abort() is called concurrently
-  private isAborting = false;
-  // Resolved by waitForComplete() when any completion condition fires
+  private streamDone = false;
   private completionResolve: (() => void) | null = null;
+  private ffmpegProc: ChildProcess | null = null;
+  private aborted = false;
 
   constructor(private cb: TtsCallbacks) {
     this.done = new Promise<void>(r => { this.doneResolve = r; });
   }
 
+  /** No-op — Edge TTS doesn't need a persistent connection */
   connect(): void {
-    console.log('[TTS] connect() called');
+    console.log('[TTS] connect() called (Edge TTS — no WS needed)');
     this.connectMs = Date.now();
-    this.contextId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    this.ws = new WebSocket(WS_URL());
-
-    this.ws.on('open', () => {
-      console.log('[TTS] Cartesia WS open');
-      this.wsOpen = true;
-      // Drain any chunks that arrived before the WS opened
-      for (const chunk of this.pendingChunks) {
-        this._send(chunk.text, chunk.continueStream);
-      }
-      this.pendingChunks = [];
-    });
-
-    this.ws.on('message', (data, isBinary) => {
-      if (isBinary) {
-        this._onAudio(data as Buffer);
-      } else {
-        try {
-          const msg = JSON.parse((data as Buffer).toString());
-          console.log('[TTS] Cartesia message received:', JSON.stringify(msg).slice(0, 200));
-          if (msg.data) this._onAudio(Buffer.from(msg.data, 'base64'));
-          if (msg.type === 'done' && msg.done === true) {
-            console.log('[TTS] waitForComplete resolved via done message');
-            this.streamDone = true;
-            this.doneResolve();
-            this.completionResolve?.();
-            this.completionResolve = null;
-          }
-          if (msg.error) {
-            console.error('[TTS] Cartesia error:', JSON.stringify(msg.error));
-            this.cb.onError('cartesia', String(msg.error?.message ?? msg.error));
-            this.doneResolve();
-          }
-        } catch { /* non-JSON frame */ }
-      }
-    });
-
-    this.ws.on('close', (code, reason) => {
-      const reasonStr = reason?.toString() || '';
-      if (!this.streamDone) {
-        console.error(`[TTS] Cartesia WS closed unexpectedly  code=${code}  reason="${reasonStr}"`);
-      } else {
-        console.log(`[TTS] Cartesia WS closed normally  code=${code}`);
-      }
-      this.doneResolve();
-    });
-    this.ws.on('error', err => {
-      console.error('[TTS] WS error:', err.message);
-      this.doneResolve();
-    });
   }
 
-  /**
-   * Accumulate LLM tokens and flush complete sentences immediately.
-   *
-   * Sentences ending in "." or "!" are sent to Cartesia with continue=true as
-   * soon as they arrive, so Cartesia starts synthesizing sentence 1 while the
-   * LLM is still generating sentence 2. This cuts first-audio latency by ~300-500ms.
-   *
-   * "?" is intentionally excluded — Cartesia requires a final chunk with
-   * continue=false to complete the context. Every Socratic response ends with
-   * "?", so leaving it in the buffer ensures endStream() sends it correctly.
-   * Flushing "?" with continue=true would leave no text for the final chunk,
-   * causing Cartesia to never send done:true and hanging the pipeline.
-   */
+  /** Accumulate LLM tokens */
   sendToken(token: string): void {
     this.textBuffer += token;
-    const buf = this.textBuffer;
-    // Flush on sentence-ending "." or "!" once we have at least 5 chars of content
-    if (buf.length >= 5 && /[.!][ \t]*$/.test(buf)) {
-      const text = buf.trimEnd();
-      this.textBuffer = '';
-      console.log(`[TTS] Sentence flush (${text.length} chars): "${text.slice(0, 60)}"`);
-      this._flushChunk(text, true); // continue=true: Cartesia maintains voice context
-    }
   }
 
   /**
-   * Signal end of LLM stream. Sends any remaining buffered text as the final chunk.
-   *
-   * If all sentences were already flushed by sendToken() (buffer is empty), we must
-   * NOT send a bogus space chunk — Cartesia may not send done:true for it, leaving
-   * chunksCompleted < chunksQueued and blocking waitForComplete() for the full 8s
-   * timeout (which holds isBusy=true and makes it look like the mic isn't working).
-   * Instead, just mark finalSent=true and resolve if all chunks are already acked.
+   * Signal end of LLM stream. Synthesizes all accumulated text via Edge TTS,
+   * decodes MP3 → PCM via ffmpeg, and streams PCM chunks to the callback.
    */
   endStream(): void {
     const text = this.textBuffer.trimEnd();
     this.textBuffer = '';
-    if (text.length > 0) {
-      console.log(`[TTS] endStream — final chunk (${text.length} chars): "${text.slice(0, 60)}"`);
-      this._flushChunk(text, false); // continue=false: finalises the Cartesia context
-    } else {
-      // All text was already flushed via sentence streaming — no more text to send.
-      // The done message from Cartesia will resolve waitForComplete().
-      this.finalSent = true;
-      console.log(`[TTS] endStream — buffer empty, all sentences pre-flushed (queued=${this.chunksQueued})`);
+    if (text.length === 0) {
+      console.log('[TTS] endStream — no text to synthesize');
+      this.streamDone = true;
+      this.doneResolve();
+      this.completionResolve?.();
+      return;
     }
+    console.log(`[TTS] endStream — synthesizing (${text.length} chars): "${text.slice(0, 80)}"`);
+    this._synthesize(text).catch(err => {
+      console.error('[TTS] Synthesis error:', err);
+      this.cb.onError('edge-tts', err.message || String(err));
+      this.streamDone = true;
+      this.doneResolve();
+      this.completionResolve?.();
+    });
   }
 
   waitForComplete(): Promise<void> {
@@ -197,24 +95,14 @@ export class CartesiaTTS {
       const done = () => {
         if (resolved) return;
         resolved = true;
-        this.ws?.off('close', onClose);
         clearTimeout(ceiling);
         resolve();
       };
 
-      // Condition 1: Cartesia sends done message (primary path)
       this.completionResolve = done;
-      // If done already fired before waitForComplete was called, resolve immediately
       if (this.streamDone) { done(); return; }
 
-      // Condition 2: WebSocket closes before done arrives
-      const onClose = () => {
-        console.log('[TTS] WS closed — resolving waitForComplete via close fallback');
-        done();
-      };
-      this.ws?.once('close', onClose);
-
-      // Condition 3: Absolute 15 second ceiling — generous to avoid cutting audio mid-sentence
+      // 15s ceiling
       const ceiling = setTimeout(() => {
         console.warn('[TTS] waitForComplete ceiling hit (15s) — forcing resolve');
         done();
@@ -222,106 +110,83 @@ export class CartesiaTTS {
     });
   }
 
-  /**
-   * Close the Cartesia WS and return a Promise that resolves when the socket
-   * is fully closed (or immediately if already closed).
-   *
-   * Awaiting this in the pipeline's finally block ensures the next pipeline's
-   * tts.connect() only fires after Cartesia registers the old connection as
-   * closed — the free tier rejects concurrent WebSocket connections.
-   *
-   * Uses wsClosed flag (set in the 'close' handler) to avoid the race where
-   * Cartesia closes from their side right after done:true before abort() is
-   * called — in that case the event already fired and we resolve immediately
-   * instead of waiting the full 1s timeout.
-   */
   abort(): Promise<void> {
-    console.log(`[TTS] abort() called — ws readyState: ${this.ws?.readyState ?? 'null'}  isAborting: ${this.isAborting}`);
-    this.doneResolve(); // unblock any waiters
-
-    // Already aborting — prevent double-close races
-    if (this.isAborting) { console.log('[TTS] abort() — already aborting, returning'); return Promise.resolve(); }
-    if (!this.ws) { console.log('[TTS] abort() — no ws, returning'); return Promise.resolve(); }
-
-    this.isAborting = true;
-    const ws = this.ws;
-    this.ws = null;
-
-    // Remove data listeners immediately to prevent processing stale frames
-    ws.removeAllListeners('message');
-    ws.removeAllListeners('open');
-
-    const readyState = ws.readyState;
-
-    // CLOSED — already done
-    if (readyState === WebSocket.CLOSED) {
-      this.isAborting = false;
-      return Promise.resolve();
+    this.aborted = true;
+    this.doneResolve();
+    if (this.ffmpegProc) {
+      try { this.ffmpegProc.kill('SIGKILL'); } catch { /* ignore */ }
+      this.ffmpegProc = null;
     }
+    return Promise.resolve();
+  }
 
-    // CLOSING — wait up to 800ms for the close event, then resolve regardless
-    if (readyState === WebSocket.CLOSING) {
-      return new Promise<void>(resolve => {
-        const timeout = setTimeout(() => { this.isAborting = false; resolve(); }, 800);
-        const done = () => { clearTimeout(timeout); this.isAborting = false; resolve(); };
-        ws.once('close', done);
-        ws.once('error', done);
-      });
-    }
+  private async _synthesize(text: string): Promise<void> {
+    if (this.aborted) return;
 
-    // OPEN or CONNECTING — initiate close, wait up to 2s
-    return new Promise<void>(resolve => {
-      const timeout = setTimeout(() => { this.isAborting = false; resolve(); }, 2000);
-      const done = () => { clearTimeout(timeout); this.isAborting = false; resolve(); };
-      ws.once('close', done);
-      ws.once('error', done);
-      try {
-        ws.close();
-      } catch {
-        // close() can throw if the socket is in a bad state
-        clearTimeout(timeout);
-        this.isAborting = false;
-        resolve();
+    const tts = new MsEdgeTTS();
+    await tts.setMetadata(VOICE, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+
+    const { audioStream } = tts.toStream(text);
+
+    // Pipe MP3 through ffmpeg to get 16kHz 16-bit mono PCM
+    const proc = spawn(ffmpegPath!, [
+      '-i', 'pipe:0',          // read MP3 from stdin
+      '-f', 's16le',           // output raw PCM
+      '-ar', '16000',          // 16kHz sample rate
+      '-ac', '1',              // mono
+      '-acodec', 'pcm_s16le',  // 16-bit signed little-endian
+      'pipe:1',                // write to stdout
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    this.ffmpegProc = proc;
+
+    // Pipe Edge TTS MP3 stream → ffmpeg stdin
+    audioStream.pipe(proc.stdin!);
+
+    // Read PCM from ffmpeg stdout
+    proc.stdout!.on('data', (chunk: Buffer) => {
+      if (this.aborted) return;
+      if (this.isFirstAudio) {
+        this.isFirstAudio = false;
+        const ms = Date.now() - this.connectMs;
+        console.log(`[TTS] First audio: ${ms}ms after connect()`);
+        this.cb.onFirstByte(ms);
+        const silence = generateSilenceBuffer(40);
+        this.cb.onAudioChunk(Buffer.concat([silence, chunk]));
+        return;
+      }
+      this.cb.onAudioChunk(chunk);
+    });
+
+    proc.stderr!.on('data', (data: Buffer) => {
+      // ffmpeg outputs progress/info to stderr — only log errors
+      const msg = data.toString();
+      if (msg.includes('Error') || msg.includes('error')) {
+        console.error('[TTS] ffmpeg error:', msg.slice(0, 200));
       }
     });
-  }
 
-  private _flushChunk(text: string, continueStream: boolean): void {
-    if (!continueStream) this.finalSent = true;
-    this.chunksQueued++;
-    console.log(`[TTS] Expecting ${this.chunksQueued} total segments (continue=${continueStream})`);
-    if (!this.wsOpen) {
-      this.pendingChunks.push({ text, continueStream });
-      return;
-    }
-    this._send(text, continueStream);
-  }
+    return new Promise<void>((resolve) => {
+      proc.on('close', (code) => {
+        this.ffmpegProc = null;
+        if (code !== 0 && !this.aborted) {
+          console.warn(`[TTS] ffmpeg exited with code ${code}`);
+        }
+        console.log('[TTS] Synthesis complete');
+        this.streamDone = true;
+        this.doneResolve();
+        this.completionResolve?.();
+        resolve();
+      });
 
-  private _onAudio(pcm: Buffer): void {
-    if (this.isFirstAudio) {
-      this.isFirstAudio = false;
-      const ms = Date.now() - this.connectMs;
-      console.log(`[TTS] First audio: ${ms}ms after connect()`);
-      this.cb.onFirstByte(ms);
-      // Brief 40ms silence offset so Simli's video generation catches up before first word
-      console.log('[TTS] Prepending 40ms silence buffer');
-      const silence = generateSilenceBuffer(40);
-      this.cb.onAudioChunk(Buffer.concat([silence, pcm]));
-      return;
-    }
-    this.cb.onAudioChunk(pcm);
-  }
-
-  private _send(transcript: string, continueStream: boolean): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    const payload: Record<string, unknown> = {
-      model_id:      MODEL,
-      transcript,
-      voice:         { mode: 'id', id: cachedVoiceId },
-      output_format: { container: 'raw', encoding: 'pcm_s16le', sample_rate: 16000 },
-      context_id:    this.contextId,
-    };
-    if (continueStream) payload.continue = true;
-    this.ws.send(JSON.stringify(payload));
+      proc.on('error', (err) => {
+        console.error('[TTS] ffmpeg process error:', err.message);
+        this.cb.onError('ffmpeg', err.message);
+        this.streamDone = true;
+        this.doneResolve();
+        this.completionResolve?.();
+        resolve();
+      });
+    });
   }
 }

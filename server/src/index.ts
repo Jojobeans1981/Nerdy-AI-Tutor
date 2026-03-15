@@ -14,10 +14,10 @@ import { DeepgramSTT } from './pipeline/stt.js';
 import { TutorSession, getCacheHitStats } from './services/pipeline.js';
 import { getReports } from './utils/latency.js';
 import { preloadVoice } from './pipeline/tts.js';
-import { warmTtsCache, setTtsCacheVoiceId, getCacheStats } from './utils/ttsCache.js';
+import { getCacheStats } from './utils/ttsCache.js';
 
 // Validate required env vars
-const required = ['DEEPGRAM_API_KEY', 'GROQ_API_KEY', 'CARTESIA_API_KEY'];
+const required = ['DEEPGRAM_API_KEY', 'GROQ_API_KEY'];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing env var: ${key}`);
@@ -180,13 +180,9 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
 
 const PORT = parseInt(process.env.PORT || '3001');
 
-// Preload Cartesia voice, then warm the TTS cache before accepting connections
-preloadVoice().then(async (voiceId) => {
-  // Warm TTS cache in background — non-blocking, server starts immediately
-  if (voiceId) {
-    setTtsCacheVoiceId(voiceId);
-    warmTtsCache().catch(err => console.warn('[TTS Cache] Warm failed:', err.message));
-  }
+// Preload TTS voice (Edge TTS — no API key needed), then start server
+preloadVoice().then(async () => {
+  // TTS cache disabled — was Cartesia-specific, Edge TTS doesn't need it
   server.listen(PORT, () => {
     console.log(`[Server] Running on http://localhost:${PORT}`);
     console.log(`[Server] WebSocket at ws://localhost:${PORT}/ws/session`);
@@ -194,6 +190,6 @@ preloadVoice().then(async (voiceId) => {
     console.log(`[Server] Cache stats at http://localhost:${PORT}/api/cache`);
   });
 }).catch((err) => {
-  console.error('[Server] Failed to preload Cartesia voice:', err.message);
+  console.error('[Server] Failed to initialize TTS:', err.message);
   process.exit(1);
 });
