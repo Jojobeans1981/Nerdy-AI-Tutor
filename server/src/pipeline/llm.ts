@@ -74,12 +74,16 @@ function buildSystemPrompt(concept: string, ctx?: SessionContext, isFirstTurn = 
     if (ctx.mistakePatterns.length > 0) lines.push(`- Known mistakes: ${ctx.mistakePatterns.join(', ')}`);
   }
 
-  // On the first turn, inject a randomly chosen opening problem so every session starts fresh
+  // On the first turn, inject a randomly chosen opening problem — but only if the
+  // student's first message is a greeting/generic start. If they say something
+  // substantive, the LLM should respond to what they actually said.
   if (isFirstTurn) {
     const pool = OPENING_PROBLEMS[concept.toLowerCase()];
     if (pool) {
       const problem = pool[Math.floor(Math.random() * pool.length)];
-      lines.push('', `START WITH THIS EXACT PROBLEM: "${problem}"`);
+      lines.push('', `FIRST TURN RULE: Read the student's message carefully.`);
+      lines.push(`- If they just say a greeting (hi, hello, let's go, ready, start, hey): use this opening problem: "${problem}"`);
+      lines.push(`- If they say ANYTHING ELSE (a question, a request, an off-topic comment, a specific math problem): respond directly to what they said. Do NOT ignore their message.`);
     }
   }
 
@@ -181,7 +185,7 @@ export async function* streamLLM(
     model: 'llama-3.1-8b-instant',
     messages,
     stream: true,
-    max_tokens: 60,
+    max_tokens: 120,
     temperature: 0.7,
   }, { signal: controller.signal });
 
