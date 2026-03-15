@@ -300,14 +300,11 @@ export class TutorSession {
 
       // Wait for TTS to finish BEFORE releasing isBusy — prevents concurrent
       // Cartesia WS connections (free tier rejects them).
+      // waitForComplete() has its own 8s ceiling + WS close fallback, so no extra race needed.
       console.log(`[Pipeline] Waiting for TTS completion...  id=${interactionId}`);
-      try {
-        let ttsTimedOut = false;
-        const ttsTimeout = new Promise<void>(r => setTimeout(() => { ttsTimedOut = true; r(); }, 5000));
-        await Promise.race([tts.waitForComplete(), ttsTimeout]);
-        if (ttsTimedOut) console.warn(`[Pipeline] TTS completion timeout (5s) — aborting Cartesia WS`);
-      } catch { /* swallow */ }
-      await Promise.race([tts.abort(), new Promise<void>(r => setTimeout(r, 1500))]).catch(() => {});
+      await tts.waitForComplete().catch(() => {});
+      console.log(`[Pipeline] TTS done — closing WS  id=${interactionId}`);
+      await tts.abort().catch(() => {});
       console.log(`[Pipeline] TTS done or timed out — entering finally  id=${interactionId}`);
     } catch (err) {
       console.error('[Pipeline] LLM/TTS stream error:', err);
@@ -319,7 +316,7 @@ export class TutorSession {
         this.history.push({ role: 'assistant', content: llmCompleted ? fullResponse : fullResponse + '…' });
       }
       // Synchronous TTS abort — must complete before isBusy releases
-      await Promise.race([tts.abort(), new Promise<void>(r => setTimeout(r, 1500))]).catch(() => {});
+      await tts.abort().catch(() => {});
     } finally {
       console.log(`[Pipeline] FINALLY block entered  id=${interactionId}  responseEndSent=${responseEndSent}`);
       // Guarantee response_end reaches the client even if both try and catch failed to send it

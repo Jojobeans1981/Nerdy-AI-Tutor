@@ -262,10 +262,21 @@ function App() {
           // Mark response as ended — trailing audio chunks will now use the 3s timer
           // instead of the 8s watchdog (see ws.onAudio handler).
           responseEndedRef.current = true;
+
+          // If NO audio was received at all (TTS failure), unmute immediately —
+          // don't wait 2.5s for hard unmute or forever for speakingDone.
+          if (!audioReceivedRef.current) {
+            console.warn('[Mic] No audio received — unmuting immediately at response_end');
+            micMutedRef.current = false;
+            setIsProcessing(false);
+            setIsAvatarActive(false);
+            break;
+          }
+
           // Fast-forward any 8s watchdog that was set before response_end arrived.
           // Audio often arrives before response_end (sentence streaming), so the
           // watchdog was set to 8s. Now that we know the response is done, reset
-          // it to 3s so the "Speaking" state clears promptly.
+          // it to 800ms so the "Speaking" state clears promptly.
           if (speakingTimeoutRef.current) {
             clearTimeout(speakingTimeoutRef.current);
             speakingTimeoutRef.current = setTimeout(() => speakingDoneRef.current?.(), 800);
