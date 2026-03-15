@@ -214,11 +214,11 @@ export class CartesiaTTS {
       };
       this.ws?.once('close', onClose);
 
-      // Condition 3: Absolute 8 second ceiling — nothing should ever take longer
+      // Condition 3: Absolute 15 second ceiling — generous to avoid cutting audio mid-sentence
       const ceiling = setTimeout(() => {
-        console.warn('[TTS] waitForComplete ceiling hit (8s) — forcing resolve');
+        console.warn('[TTS] waitForComplete ceiling hit (15s) — forcing resolve');
         done();
-      }, 8000);
+      }, 15000);
     });
   }
 

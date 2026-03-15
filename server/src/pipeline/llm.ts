@@ -185,7 +185,7 @@ export async function* streamLLM(
     model: 'llama-3.1-8b-instant',
     messages,
     stream: true,
-    max_tokens: 120,
+    max_tokens: 80,
     temperature: 0.7,
   }, { signal: controller.signal });
 
