@@ -178,17 +178,42 @@ wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
   });
 });
 
-const PORT = parseInt(process.env.PORT || '3001');
+const DEFAULT_PORT = parseInt(process.env.PORT || '3001');
+const MAX_PORT_ATTEMPTS = 10;
+
+function tryListen(port: number, attempt = 1): void {
+  server.listen(port, () => {
+    console.log(`[Server] Running on http://localhost:${port}`);
+    console.log(`[Server] WebSocket at ws://localhost:${port}/ws/session`);
+    console.log(`[Server] Latency dashboard at http://localhost:${port}/api/latency`);
+    console.log(`[Server] Cache stats at http://localhost:${port}/api/cache`);
+    if (port !== DEFAULT_PORT) {
+      console.log(`\n  ⚠  Default port ${DEFAULT_PORT} was busy — using ${port} instead.`);
+      console.log(`     Update your client's WS_URL if needed: ws://localhost:${port}/ws/session\n`);
+    }
+  });
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      server.removeAllListeners('error');
+      const next = port + 1;
+      if (attempt >= MAX_PORT_ATTEMPTS) {
+        console.error(`[Server] Ports ${DEFAULT_PORT}–${port} all busy. Free a port or set PORT env var.`);
+        process.exit(1);
+      }
+      console.warn(`[Server] Port ${port} is busy — trying ${next}...`);
+      tryListen(next, attempt + 1);
+    } else {
+      console.error('[Server] Listen error:', err.message);
+      process.exit(1);
+    }
+  });
+}
 
 // Preload TTS voice (Edge TTS — no API key needed), then start server
 preloadVoice().then(async () => {
   // TTS cache disabled — was Cartesia-specific, Edge TTS doesn't need it
-  server.listen(PORT, () => {
-    console.log(`[Server] Running on http://localhost:${PORT}`);
-    console.log(`[Server] WebSocket at ws://localhost:${PORT}/ws/session`);
-    console.log(`[Server] Latency dashboard at http://localhost:${PORT}/api/latency`);
-    console.log(`[Server] Cache stats at http://localhost:${PORT}/api/cache`);
-  });
+  tryListen(DEFAULT_PORT);
 }).catch((err) => {
   console.error('[Server] Failed to initialize TTS:', err.message);
   process.exit(1);

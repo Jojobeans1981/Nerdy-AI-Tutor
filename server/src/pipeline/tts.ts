@@ -112,7 +112,9 @@ export class CartesiaTTS {
 
   abort(): Promise<void> {
     this.aborted = true;
+    this.streamDone = true;
     this.doneResolve();
+    this.completionResolve?.();
     if (this.ffmpegProc) {
       try { this.ffmpegProc.kill('SIGKILL'); } catch { /* ignore */ }
       this.ffmpegProc = null;

@@ -34,6 +34,8 @@ export class TutorSession {
   private pendingUtterance: { transcript: string; interactionId: string; sttMs: number } | null = null;
   // AbortController for the currently running pipeline (barge-in support)
   private currentAbortController: AbortController | null = null;
+  // Reference to the active TTS instance so interrupt() can abort the drain phase
+  private activeTts: CartesiaTTS | null = null;
 
   // FIX 6: Session-level mastery and hint tracking
   private conceptsMastered: string[] = [];
@@ -68,6 +70,12 @@ export class TutorSession {
     if (this.isBusy && this.currentAbortController) {
       console.log('[Pipeline] Barge-in — aborting current pipeline');
       this.currentAbortController.abort(new Error('barge-in'));
+      // Also abort the TTS drain phase — without this, waitForComplete() blocks
+      // isBusy for up to 15s even after the LLM/TTS stream is aborted.
+      if (this.activeTts) {
+        console.log('[Pipeline] Barge-in — aborting TTS drain');
+        this.activeTts.abort().catch(() => {});
+      }
     }
   }
 
@@ -111,6 +119,12 @@ export class TutorSession {
       // Queue the utterance so it runs after the current pipeline finishes
       console.log(`[Pipeline] Busy — queuing: "${transcript.slice(0, 60)}"`);
       this.pendingUtterance = { transcript, interactionId, sttMs };
+      // If the pipeline is stuck draining TTS audio, abort the drain so the
+      // queued utterance can start promptly instead of waiting up to 15s.
+      if (this.activeTts) {
+        console.log('[Pipeline] Aborting TTS drain — new utterance queued');
+        this.activeTts.abort().catch(() => {});
+      }
       return;
     }
     this.isBusy = true;
@@ -183,6 +197,7 @@ export class TutorSession {
       },
     });
 
+    this.activeTts = tts;
     tts.connect(); // non-blocking — runs in parallel with verification below
 
     // Use the prefetched verify promise if it was started on is_final (~250ms ago),
@@ -309,6 +324,7 @@ export class TutorSession {
         try { this.ws.send(JSON.stringify({ type: 'response_end', interaction_id: interactionId, error: true })); } catch { /* WS closed */ }
       }
       this.currentAbortController = null;
+      this.activeTts = null;
       clearTimeout(safetyFuse);
       console.log(`[Pipeline] FINALLY block complete  id=${interactionId}`);
     }
